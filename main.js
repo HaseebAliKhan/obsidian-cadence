@@ -973,6 +973,256 @@ function stringifyTasks(items) {
   return items.map((t) => `${t.done ? '- [x] ' : '- [ ] '}${t.title || ''}`).join('\n');
 }
 
+/* ─────────── Task Date & Sync Helpers ─────────── */
+
+function parseTaskDate(title) {
+  if (!title) return null;
+  const str = String(title);
+  const mEmoji = str.match(/📅\s*(\d{4}-\d{2}-\d{2})/);
+  if (mEmoji) return mEmoji[1];
+  const mAt = str.match(/@(\d{4}-\d{2}-\d{2})/);
+  if (mAt) return mAt[1];
+  const mDue = str.match(/\[?(?:due|scheduled|by|on)::?\s*(\d{4}-\d{2}-\d{2})\]?/i);
+  if (mDue) return mDue[1];
+  const mIso = str.match(/(?:^|\s)(\d{4}-\d{2}-\d{2})(?:$|\s)/);
+  if (mIso) return mIso[1].trim();
+  return null;
+}
+
+function stripTaskDate(title) {
+  if (!title) return '';
+  let str = String(title);
+  str = str.replace(/📅\s*\d{4}-\d{2}-\d{2}/g, '');
+  str = str.replace(/@\d{4}-\d{2}-\d{2}/g, '');
+  str = str.replace(/\[?(?:due|scheduled|by|on)::?\s*\d{4}-\d{2}-\d{2}\]?/gi, '');
+  str = str.replace(/(?:^|\s)\d{4}-\d{2}-\d{2}(?:$|\s)/g, ' ');
+  return str.replace(/\s{2,}/g, ' ').replace(/^[\s—–-]+|[\s—–-]+$/g, '').trim();
+}
+
+function setTaskDateInTitle(title, dateStr) {
+  const clean = stripTaskDate(title);
+  if (!dateStr) return clean;
+  return clean ? `${clean} 📅 ${dateStr}` : `📅 ${dateStr}`;
+}
+
+function extractProjectLinks(title) {
+  if (!title) return [];
+  const regex = /\[\[(.*?)\]\]/g;
+  const links = [];
+  let match;
+  while ((match = regex.exec(String(title))) !== null) {
+    let target = match[1].trim();
+    if (target.includes('|')) target = target.split('|')[0].trim();
+    if (target) links.push(target);
+  }
+  return links;
+}
+
+function stripProjectLinks(title) {
+  if (!title) return '';
+  return String(title).replace(/\[\[(.*?)\]\]/g, '').replace(/\s{2,}/g, ' ').trim();
+}
+
+/* ─────────── Task Milestone Helpers ─────────── */
+
+function parseTaskMilestone(title) {
+  if (!title) return null;
+  const str = String(title);
+  const mField = str.match(/\[milestone::?\s*([^\]]+)\]/i);
+  if (mField) return mField[1].trim();
+  const mWiki = str.match(/🎯\s*\[\[([^\]]+)\]\]/);
+  if (mWiki) return mWiki[1].trim();
+  return null;
+}
+
+function stripTaskMilestone(title) {
+  if (!title) return '';
+  let str = String(title);
+  str = str.replace(/\[milestone::?\s*[^\]]+\]/gi, '');
+  str = str.replace(/🎯\s*\[\[[^\]]+\]\]/g, '');
+  return str.replace(/\s{2,}/g, ' ').trim();
+}
+
+function setTaskMilestone(title, milestoneName) {
+  const clean = stripTaskMilestone(title);
+  if (!milestoneName || !milestoneName.trim()) return clean;
+  return clean ? `${clean} [milestone:: ${milestoneName.trim()}]` : `[milestone:: ${milestoneName.trim()}]`;
+}
+
+function cleanTaskDisplayTitle(rawTitle) {
+  if (!rawTitle) return '';
+  return stripTaskMilestone(stripTaskDate(stripProjectLinks(rawTitle))).replace(/\s{2,}/g, ' ').trim();
+}
+
+function syncMilestonesWithTasks(content, tasks) {
+  if (!content) return { changed: false, content };
+  const sections = parseH2Sections(content);
+  let milestoneKey = null;
+  for (const key of Object.keys(sections)) {
+    const { cleanLabel, tag } = parseHeaderKey(key);
+    if (tag === '#milestones' || cleanLabel.toLowerCase() === 'milestones') {
+      milestoneKey = key;
+      break;
+    }
+  }
+  if (!milestoneKey) return { changed: false, content };
+
+  const milestones = parseMilestones(sections[milestoneKey] || '');
+  if (!milestones.length) return { changed: false, content };
+
+  const milestoneTasksMap = new Map();
+  (tasks || []).forEach(t => {
+    const ms = parseTaskMilestone(t.title);
+    if (ms) {
+      const k = ms.trim().toLowerCase();
+      if (!milestoneTasksMap.has(k)) milestoneTasksMap.set(k, []);
+      milestoneTasksMap.get(k).push(t);
+    }
+  });
+
+  let changed = false;
+  milestones.forEach(m => {
+    const mTitle = (m.title || '').trim().toLowerCase();
+    const linkedTasks = milestoneTasksMap.get(mTitle);
+    if (linkedTasks && linkedTasks.length > 0) {
+      const allDone = linkedTasks.every(t => !!t.done);
+      if (m.done !== allDone) {
+        m.done = allDone;
+        changed = true;
+      }
+    }
+  });
+
+  if (!changed) return { changed: false, content, milestones };
+
+  const newMilestoneBody = stringifyMilestones(milestones);
+  const newContent = replaceSection(content, `## ${milestoneKey}`, newMilestoneBody || '');
+  return { changed: true, content: newContent, milestones };
+}
+
+async function removeTaskFromDailyNote(app, settings, dateStr, cleanTitle, projectName) {
+  if (!dateStr || !cleanTitle) return;
+  const dateObj = new Date(dateStr + 'T12:00:00');
+  if (isNaN(dateObj.getTime())) return;
+  const path = dailyNotePath(settings, dateObj);
+  const file = app.vault.getAbstractFileByPath(path);
+  if (!file || !(file instanceof obsidian.TFile)) return;
+
+  let content = '';
+  try { content = await app.vault.read(file); } catch (_) { return; }
+  const parsed = parseSections(content, settings);
+  const cleanTarget = cleanTaskDisplayTitle(cleanTitle).toLowerCase();
+
+  const filtered = parsed.tasks.filter((line) => {
+    const lineText = line.replace(/^\s*-\s\[(x|X| )\]\s/, '').trim();
+    const cleanLine = cleanTaskDisplayTitle(lineText).toLowerCase();
+    if (cleanLine === cleanTarget) {
+      if (projectName) {
+        const links = extractProjectLinks(lineText);
+        if (links.length > 0 && !links.some((l) => l.toLowerCase() === projectName.toLowerCase())) {
+          return true;
+        }
+      }
+      return false;
+    }
+    return true;
+  });
+
+  if (filtered.length !== parsed.tasks.length) {
+    const next = replaceSection(content, settings.tasksHeading, filtered.join('\n'));
+    await app.vault.modify(file, next);
+  }
+}
+
+async function syncProjectTaskToDailyNote(app, settings, projectFile, task, oldTask, overrideNewDate, overrideOldDate) {
+  const projectName = (projectFile && projectFile.basename) ? projectFile.basename : '';
+
+  const oldTitle = oldTask ? (oldTask.title || '') : '';
+  const newTitle = task ? (task.title || '') : '';
+  const oldDate = overrideOldDate !== undefined ? overrideOldDate : parseTaskDate(oldTitle);
+  const newDate = overrideNewDate !== undefined ? overrideNewDate : parseTaskDate(newTitle);
+  const cleanTitle = cleanTaskDisplayTitle(newTitle);
+  const oldCleanTitle = cleanTaskDisplayTitle(oldTitle);
+
+  // 1. If date changed or clean title changed or date removed, clean up old daily note
+  if (oldDate && (oldDate !== newDate || oldCleanTitle !== cleanTitle || !newDate)) {
+    await removeTaskFromDailyNote(app, settings, oldDate, oldCleanTitle || cleanTitle, projectName);
+  }
+
+  // 2. If new date is present, add or update in that date's daily note
+  if (newDate && cleanTitle) {
+    const dateObj = new Date(newDate + 'T12:00:00');
+    if (!isNaN(dateObj.getTime())) {
+      const dailyFile = await ensureDailyNote(app, settings, dateObj);
+      if (dailyFile && dailyFile instanceof obsidian.TFile) {
+        let content = '';
+        try { content = await app.vault.read(dailyFile); } catch (_) { return; }
+        const parsed = parseSections(content, settings);
+
+        const cleanTarget = cleanTitle.toLowerCase();
+        let found = false;
+        const taskLineText = projectName
+          ? `${task.done ? '- [x] ' : '- [ ] '}${cleanTitle} [[${projectName}]]`
+          : `${task.done ? '- [x] ' : '- [ ] '}${cleanTitle}`;
+
+        const updatedTasks = parsed.tasks.map((line) => {
+          const lineText = line.replace(/^\s*-\s\[(x|X| )\]\s/, '').trim();
+          const cleanLine = cleanTaskDisplayTitle(lineText).toLowerCase();
+          if (cleanLine === cleanTarget) {
+            found = true;
+            return taskLineText;
+          }
+          return line;
+        });
+
+        if (!found) {
+          updatedTasks.push(taskLineText);
+        }
+
+        const next = replaceSection(content, settings.tasksHeading, updatedTasks.join('\n'));
+        await app.vault.modify(dailyFile, next);
+      }
+    }
+  }
+}
+
+async function syncDailyNoteTaskToProject(app, settings, projectFile, taskLine, dateStr) {
+  if (!projectFile || !(projectFile instanceof obsidian.TFile)) return;
+  let content = '';
+  try { content = await app.vault.read(projectFile); } catch (_) { return; }
+  const sections = parseH2Sections(content);
+  const tasks = parseTasksList(sections['Tasks'] || '');
+  const cleanDailyTitle = cleanTaskDisplayTitle(taskLine.replace(/^\s*-\s\[(x|X| )\]\s/, ''));
+  if (!cleanDailyTitle) return;
+  const isDone = /^\s*-\s\[(x|X)\]\s/.test(taskLine);
+
+  const existingIdx = tasks.findIndex((t) => {
+    const cleanProjTitle = cleanTaskDisplayTitle(t.title).toLowerCase();
+    return cleanProjTitle === cleanDailyTitle.toLowerCase();
+  });
+
+  let formattedTitle = setTaskDateInTitle(cleanDailyTitle, dateStr);
+
+  if (existingIdx >= 0) {
+    const existingMilestone = parseTaskMilestone(tasks[existingIdx].title);
+    if (existingMilestone) {
+      formattedTitle = setTaskMilestone(formattedTitle, existingMilestone);
+    }
+    tasks[existingIdx].title = formattedTitle;
+    tasks[existingIdx].done = isDone;
+  } else {
+    tasks.push({ done: isDone, title: formattedTitle });
+  }
+
+  const newSection = stringifyTasks(tasks);
+  let next = replaceSection(content, '## Tasks', newSection);
+  const syncResult = syncMilestonesWithTasks(next, tasks);
+  if (syncResult.changed) {
+    next = syncResult.content;
+  }
+  await app.vault.modify(projectFile, next);
+}
+
 async function readProjectMeta(app, file) {
   const content = await app.vault.read(file);
   const sections = parseH2Sections(content);
@@ -987,16 +1237,65 @@ async function readProjectMeta(app, file) {
     }
   }
 
+  // Find tasks dynamically from markdown sections or TaskNotes
+  let tasks = [];
+  const plugin = (app && app.plugins && typeof app.plugins.getPlugin === 'function')
+    ? app.plugins.getPlugin('cadence-planner')
+    : (app && app.plugins && app.plugins.plugins ? app.plugins.plugins['cadence-planner'] : null);
+  if (plugin && plugin.settings && plugin.settings.taskManagementSystem === 'tasknotes' && typeof listTaskNotesTasksForFile === 'function') {
+    tasks = listTaskNotesTasksForFile(app, file).map((t) => ({ done: t.done, title: t.title }));
+  } else {
+    for (const [key, val] of Object.entries(sections)) {
+      const { cleanLabel, tag } = parseHeaderKey(key);
+      if (tag === '#tasks' || cleanLabel.toLowerCase() === 'tasks') {
+        tasks = tasks.concat(parseTasksList(val));
+      }
+    }
+  }
+
   const milestones = parseMilestones(milestoneText);
   const total = milestones.length;
-  const done = milestones.filter((m) => m.done).length;
-  const percent = total === 0 ? 0 : Math.round((done / total) * 100);
+
+  const milestoneTasksMap = new Map();
+  (tasks || []).forEach((t) => {
+    const ms = parseTaskMilestone(t.title);
+    if (ms) {
+      const k = ms.trim().toLowerCase();
+      if (!milestoneTasksMap.has(k)) milestoneTasksMap.set(k, []);
+      milestoneTasksMap.get(k).push(t);
+    }
+  });
+
+  let done = 0;
+  let sumFractions = 0;
+
+  milestones.forEach((m) => {
+    const mTitle = (m.title || '').trim().toLowerCase();
+    const linkedTasks = milestoneTasksMap.get(mTitle);
+    if (linkedTasks && linkedTasks.length > 0) {
+      const doneCount = linkedTasks.filter((t) => !!t.done).length;
+      const allDone = doneCount === linkedTasks.length;
+      if (m.done || allDone) {
+        sumFractions += 1.0;
+        done += 1;
+      } else {
+        sumFractions += (doneCount / linkedTasks.length);
+      }
+    } else {
+      if (m.done) {
+        sumFractions += 1.0;
+        done += 1;
+      }
+    }
+  });
+
+  const percent = total === 0 ? 0 : Math.min(100, Math.max(0, Math.round((sumFractions / total) * 100)));
   const today = startOfDay(new Date());
   const upcoming = milestones
     .filter((m) => !m.done && m.date)
     .sort((a, b) => a.date - b.date);
   const next = upcoming[0] || null;
-  return { content, sections, milestones, total, done, percent, next, today };
+  return { content, sections, milestones, tasks, total, done, percent, next, today };
 }
 
 async function createEntity(app, entityKeyOrFolder, rawName) {
@@ -1186,8 +1485,13 @@ function projectNameFromPath(app, path) {
 /* Find an existing reminder linked to a specific (project, task-text) pair. */
 function findProjectTaskReminder(plugin, projectPath, taskText) {
   if (!projectPath || !taskText) return null;
-  const all = plugin.settings.reminders || [];
-  return all.find((r) => !r.done && r.project === projectPath && r.text === taskText) || null;
+  const all = (plugin && plugin.settings && plugin.settings.reminders) || [];
+  const cleanT = stripTaskDate(stripProjectLinks(taskText)).trim().toLowerCase();
+  return all.find((r) => {
+    if (r.done || r.project !== projectPath) return false;
+    const rClean = stripTaskDate(stripProjectLinks(r.text || '')).trim().toLowerCase();
+    return rClean === cleanT || (r.text || '').trim() === taskText.trim();
+  }) || null;
 }
 
 function reminderTimeStr(when) {
@@ -2694,17 +2998,36 @@ class CadenceAppView extends obsidian.ItemView {
   _taskLinkKey(dailyPath, text) { return `${dailyPath}::${(text || '').trim()}`; }
 
   _getTaskProjectLink(dailyPath, text) {
+    if (!text) return null;
+    const inlineLinks = extractProjectLinks(text);
+    if (inlineLinks.length > 0) {
+      const projectFiles = listEntityFiles(this.app, 'project');
+      for (const pName of inlineLinks) {
+        const pFile = projectFiles.find((f) => f.basename.toLowerCase() === pName.toLowerCase());
+        if (pFile) return pFile.path;
+      }
+    }
     const map = (this.plugin.settings && this.plugin.settings.taskProjectLinks) || {};
-    return map[this._taskLinkKey(dailyPath, text)] || null;
+    const clean = stripTaskDate(stripProjectLinks(text));
+    return map[this._taskLinkKey(dailyPath, text)] || map[this._taskLinkKey(dailyPath, clean)] || null;
   }
 
   async _setTaskProjectLink(dailyPath, text, projectPath) {
     if (!this.plugin.settings.taskProjectLinks) this.plugin.settings.taskProjectLinks = {};
     const key = this._taskLinkKey(dailyPath, text);
+    const cleanKey = this._taskLinkKey(dailyPath, stripTaskDate(stripProjectLinks(text)));
     if (projectPath) {
       this.plugin.settings.taskProjectLinks[key] = projectPath;
+      this.plugin.settings.taskProjectLinks[cleanKey] = projectPath;
+      const projectFile = this.app.vault.getAbstractFileByPath(projectPath);
+      if (projectFile && projectFile instanceof obsidian.TFile) {
+        const m = dailyPath.match(/(\d{4}-\d{2}-\d{2})/);
+        const dateStr = m ? m[1] : ymd(new Date());
+        await syncDailyNoteTaskToProject(this.app, this.plugin.settings, projectFile, text, dateStr);
+      }
     } else {
       delete this.plugin.settings.taskProjectLinks[key];
+      delete this.plugin.settings.taskProjectLinks[cleanKey];
     }
     await this.plugin.saveSettings();
     this.render();
@@ -2783,6 +3106,13 @@ class CadenceAppView extends obsidian.ItemView {
     this.containerEl.children[1].empty();
     await this.render();
 
+    const isEditing = () => {
+      const active = document.activeElement;
+      return !!(active && this.containerEl && this.containerEl.contains(active) && (
+        active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable
+      ));
+    };
+
     // Listen to live editor changes to dynamically update Cadence views as you type
     this.registerEvent(this.app.workspace.on('editor-change', (editor, info) => {
       const file = info.file;
@@ -2796,33 +3126,44 @@ class CadenceAppView extends obsidian.ItemView {
       }
 
       if (shouldRender) {
+        if (isEditing()) return;
         if (this._liveRenderTimer) clearTimeout(this._liveRenderTimer);
         this._liveRenderTimer = setTimeout(() => {
-          this.render();
+          if (!isEditing()) this.render();
         }, 300);
       }
     }));
 
     this.registerEvent(this.app.vault.on('modify', (file) => {
       if (this.detailFile && file && file.path === this.detailFile.path) {
-        // Skip refresh only if active focus is inside our view leaf to prevent stealing input focus
-        if (this.app.workspace.getActiveLeaf() === this.leaf) return;
+        // Skip refresh if user is currently editing or leaf has focus
+        if (isEditing() || this.app.workspace.getActiveLeaf() === this.leaf) return;
         return this.render();
       }
       if (this.mode === 'planner.today' && this.todayFile && file.path === this.todayFile.path) {
+        if (isEditing()) return;
         return this.render();
       }
       if (this.mode === 'planner.calendar') {
         const days = weekDates(this.plannerAnchor, this.plugin.settings.weekStartsOn);
         const paths = days.map((d) => dailyNotePath(this.plugin.settings, d));
-        if (paths.includes(file.path)) return this.render();
+        if (paths.includes(file.path)) {
+          if (isEditing()) return;
+          return this.render();
+        }
       }
-      if (this._modeUsesEntityFolder(file.path)) return this.render();
+      if (this._modeUsesEntityFolder(file.path)) {
+        if (isEditing()) return;
+        return this.render();
+      }
     }));
 
     const entityRefresh = (file) => {
       if (this.detailFile && file && file.path === this.detailFile.path) return;
-      if (this._modeUsesEntityFolder(file && file.path)) this.render();
+      if (this._modeUsesEntityFolder(file && file.path)) {
+        if (isEditing()) return;
+        this.render();
+      }
     };
     this.registerEvent(this.app.vault.on('create', entityRefresh));
     this.registerEvent(this.app.vault.on('delete', (file) => {
@@ -2834,19 +3175,26 @@ class CadenceAppView extends obsidian.ItemView {
     }));
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
       if (this.detailFile && file && file.path === this.detailFile.path) return;
-      if (this._modeUsesEntityFolder(file && file.path) || this._modeUsesEntityFolder(oldPath)) this.render();
+      if (this._modeUsesEntityFolder(file && file.path) || this._modeUsesEntityFolder(oldPath)) {
+        if (isEditing()) return;
+        this.render();
+      }
     }));
     this.registerEvent(this.app.metadataCache.on('changed', (file) => {
       if (this.detailFile && file && file.path === this.detailFile.path) {
-        if (this.app.workspace.getActiveLeaf() === this.leaf) return;
+        if (isEditing() || this.app.workspace.getActiveLeaf() === this.leaf) return;
         return this.render();
       }
-      if (this._modeUsesEntityFolder(file && file.path)) this.render();
+      if (this._modeUsesEntityFolder(file && file.path)) {
+        if (isEditing()) return;
+        this.render();
+      }
     }));
 
     // Auto-refresh when user clicks back onto the Cadence pane
     this.registerEvent(this.app.workspace.on('active-leaf-change', (leaf) => {
       if (leaf === this.leaf) {
+        if (isEditing()) return;
         this.render();
       }
     }));
@@ -5040,7 +5388,7 @@ class CadenceAppView extends obsidian.ItemView {
     });
 
     leftKeys.forEach((key) => {
-      this._renderDynamicH2Section(left, file, meta.sections, key, flashSaved);
+      this._renderDynamicH2Section(left, file, meta.sections, key, flashSaved, meta.milestones);
     });
 
     const standardMetadata = {
@@ -5057,7 +5405,7 @@ class CadenceAppView extends obsidian.ItemView {
       if (metaInfo) {
         this._renderProjectTextSection(right, file, meta.sections, { key, label: metaInfo.label, rows: metaInfo.rows, placeholder: metaInfo.placeholder }, flashSaved);
       } else {
-        this._renderDynamicH2Section(right, file, meta.sections, key, flashSaved);
+        this._renderDynamicH2Section(right, file, meta.sections, key, flashSaved, meta.milestones);
       }
     });
 
@@ -5066,7 +5414,7 @@ class CadenceAppView extends obsidian.ItemView {
     this._renderCrossSections(crossSectionContainer, 'project', titleVal);
   }
 
-  _renderMilestoneSection(parent, file, milestones, flashSaved, rawKey = 'Milestones') {
+  _renderMilestoneSection(parent, file, milestones, flashSaved, rawKey = 'Milestones', projectSections = null) {
     const card = parent.createDiv({ cls: 'cad-pd-card' });
     const head = card.createDiv({ cls: 'cad-pd-card-head' });
     const { cleanLabel } = parseHeaderKey(rawKey);
@@ -5087,7 +5435,38 @@ class CadenceAppView extends obsidian.ItemView {
         cb.checked = !!m.done;
         cb.addEventListener('change', async () => {
           items[idx].done = cb.checked;
-          await this._commitMilestones(file, items, flashSaved, false, rawKey);
+          await this._commitMilestones(file, items, flashSaved, true, rawKey);
+
+          // If milestone is toggled, also sync all tasks associated with this milestone
+          const mTitle = (items[idx].title || '').trim().toLowerCase();
+          if (mTitle) {
+            const content = await this.app.vault.read(file);
+            const sections = parseH2Sections(content);
+            let tasksKey = null;
+            for (const k of Object.keys(sections)) {
+              const { cleanLabel, tag } = parseHeaderKey(k);
+              if (tag === '#tasks' || cleanLabel.toLowerCase() === 'tasks') {
+                tasksKey = k;
+                break;
+              }
+            }
+            if (tasksKey) {
+              const taskList = parseTasksList(sections[tasksKey] || '');
+              let taskChanged = false;
+              taskList.forEach(t => {
+                const tMs = (parseTaskMilestone(t.title) || '').trim().toLowerCase();
+                if (tMs === mTitle && !!t.done !== !!cb.checked) {
+                  t.done = cb.checked;
+                  taskChanged = true;
+                }
+              });
+              if (taskChanged) {
+                await this._commitTasks(file, taskList, flashSaved, false, tasksKey);
+                return;
+              }
+            }
+          }
+          this.render();
         });
         const dateInp = row.createEl('input', { type: 'date', cls: 'cad-pd-mile-date' });
         if (m.date instanceof Date && !isNaN(m.date.getTime())) {
@@ -5101,16 +5480,53 @@ class CadenceAppView extends obsidian.ItemView {
             await this._commitMilestones(file, items, flashSaved, true, rawKey);
           }, 350);
         });
+        dateInp.addEventListener('keydown', (ev) => ev.stopPropagation());
+
         const titleInp = row.createEl('input', { type: 'text', cls: 'cad-pd-mile-title' });
         titleInp.value = m.title || '';
         titleInp.placeholder = 'Milestone title';
+
+        // Check if any tasks in this project are linked to this milestone
+        if (projectSections) {
+          let allTasks = [];
+          for (const [k, v] of Object.entries(projectSections)) {
+            const { cleanLabel, tag } = parseHeaderKey(k);
+            if (tag === '#tasks' || cleanLabel.toLowerCase() === 'tasks') {
+              allTasks = parseTasksList(v);
+              break;
+            }
+          }
+          const mName = (m.title || '').trim().toLowerCase();
+          const linked = allTasks.filter(t => (parseTaskMilestone(t.title) || '').trim().toLowerCase() === mName);
+          if (linked.length > 0) {
+            const doneCount = linked.filter(t => !!t.done).length;
+            const badge = row.createSpan({ cls: 'cad-mile-task-badge' + (doneCount === linked.length ? ' all-done' : '') });
+            badge.setText(`${doneCount}/${linked.length} tasks`);
+            badge.title = `${doneCount} of ${linked.length} tasks completed for this milestone`;
+          }
+        }
+
+        const commitMileTitle = async () => {
+          clearTimeout(tt);
+          if (items[idx] && items[idx].title !== titleInp.value) {
+            items[idx].title = titleInp.value;
+            await this._commitMilestones(file, items, flashSaved, true, rawKey);
+          }
+        };
+
         let tt;
         titleInp.addEventListener('input', () => {
           clearTimeout(tt);
-          tt = setTimeout(async () => {
-            items[idx].title = titleInp.value;
-            await this._commitMilestones(file, items, flashSaved, true, rawKey);
-          }, 400);
+          tt = setTimeout(commitMileTitle, 400);
+        });
+        titleInp.addEventListener('blur', commitMileTitle);
+        titleInp.addEventListener('keydown', (ev) => {
+          ev.stopPropagation();
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            commitMileTitle();
+            titleInp.blur();
+          }
         });
         const del = row.createEl('button', { cls: 'cad-btn cad-btn-sm cad-btn-danger', text: '×' });
         del.title = 'Delete milestone';
@@ -5181,7 +5597,7 @@ class CadenceAppView extends obsidian.ItemView {
     if (!skipRender) this.render();
   }
 
-  _renderTaskSection(parent, file, tasks, flashSaved, rawKey = 'Tasks') {
+  _renderTaskSection(parent, file, tasks, flashSaved, rawKey = 'Tasks', projectMilestones = null) {
     const card = parent.createDiv({ cls: 'cad-pd-card' });
     const head = card.createDiv({ cls: 'cad-pd-card-head' });
 
@@ -5213,8 +5629,10 @@ class CadenceAppView extends obsidian.ItemView {
             const taskObj = fileTaskNotes[idx];
             await toggleTaskNotesTask(this.app, taskObj.file, cb.checked);
           } else {
+            const oldItem = Object.assign({}, items[idx]);
             items[idx].done = cb.checked;
             await this._commitTasks(file, items, flashSaved, false, rawKey);
+            await syncProjectTaskToDailyNote(this.app, this.plugin.settings, file, items[idx], oldItem);
             const txt = (items[idx].title || '').trim();
             if (txt) await this._propagateTaskComplete(txt, cb.checked, { kind: 'project', file });
           }
@@ -5233,31 +5651,128 @@ class CadenceAppView extends obsidian.ItemView {
           });
         } else {
           const titleInp = row.createEl('input', { type: 'text', cls: 'cad-pd-task-title' });
-          titleInp.value = t.title || '';
+          titleInp.value = cleanTaskDisplayTitle(t.title);
           titleInp.placeholder = 'Task description';
+
+          if (this._focusTaskIdx === idx) {
+            this._focusTaskIdx = null;
+            setTimeout(() => {
+              titleInp.focus();
+            }, 30);
+          }
+
+          /* Milestone dropdown selector */
+          const msSelect = row.createEl('select', { cls: 'cad-pd-task-milestone-select' });
+          const currentMs = parseTaskMilestone(t.title) || '';
+          if (currentMs) msSelect.addClass('active');
+
+          const defaultOpt = msSelect.createEl('option', { value: '', text: '🎯 Milestone' });
+          if (!currentMs) defaultOpt.selected = true;
+
+          const validMilestones = (projectMilestones || []).filter(m => m && (m.title || '').trim());
+          validMilestones.forEach(m => {
+            const opt = msSelect.createEl('option', { value: m.title.trim(), text: `🎯 ${m.title.trim()}` });
+            if (currentMs.toLowerCase() === m.title.trim().toLowerCase()) {
+              opt.selected = true;
+            }
+          });
+
+          msSelect.title = currentMs ? `Milestone: ${currentMs}` : 'Associate task to a milestone';
+
+          msSelect.addEventListener('change', async () => {
+            const selectedMs = msSelect.value;
+            items[idx].milestone = selectedMs || null;
+            const baseTitle = cleanTaskDisplayTitle(items[idx].title || titleInp.value);
+            const currentDate = parseTaskDate(items[idx].title);
+            const projectLinks = extractProjectLinks(items[idx].title);
+
+            let newTitle = baseTitle;
+            if (projectLinks.length) newTitle += ' ' + projectLinks.map(p => `[[${p}]]`).join(' ');
+            if (selectedMs) newTitle = setTaskMilestone(newTitle, selectedMs);
+            if (currentDate) newTitle = setTaskDateInTitle(newTitle, currentDate);
+
+            items[idx].title = newTitle;
+            if (selectedMs) {
+              msSelect.addClass('active');
+              msSelect.title = `Milestone: ${selectedMs}`;
+            } else {
+              msSelect.removeClass('active');
+              msSelect.title = 'Associate task to a milestone';
+            }
+
+            await this._commitTasks(file, items, flashSaved, false, rawKey);
+          });
+
+          const commitValue = async () => {
+            clearTimeout(tt);
+            const cleanInput = cleanTaskDisplayTitle(titleInp.value);
+            const currentMilestone = msSelect.value || (items[idx].milestone || parseTaskMilestone(items[idx].title));
+            const currentDate = parseTaskDate(items[idx].title);
+            const projectLinks = extractProjectLinks(items[idx].title);
+
+            let fullTitle = cleanInput;
+            if (projectLinks.length) fullTitle += ' ' + projectLinks.map(p => `[[${p}]]`).join(' ');
+            if (currentMilestone) fullTitle = setTaskMilestone(fullTitle, currentMilestone);
+            if (currentDate) fullTitle = setTaskDateInTitle(fullTitle, currentDate);
+
+            if (items[idx] && items[idx].title !== fullTitle) {
+              const oldTitle = items[idx].title;
+              items[idx].title = fullTitle;
+              await this._commitTasks(file, items, flashSaved, true, rawKey);
+
+              const oldClean = cleanTaskDisplayTitle(oldTitle);
+              const newClean = cleanInput;
+              if (oldClean && newClean && oldClean !== newClean) {
+                const linked = findProjectTaskReminder(this.plugin, file.path, oldClean);
+                if (linked) {
+                  await this.plugin.updateReminder(linked.id, { text: newClean });
+                }
+              }
+            }
+          };
+
           let tt;
           titleInp.addEventListener('input', () => {
             clearTimeout(tt);
-            tt = setTimeout(async () => {
-              items[idx].title = titleInp.value;
-              await this._commitTasks(file, items, flashSaved, true, rawKey);
-            }, 400);
+            tt = setTimeout(commitValue, 400);
+          });
+
+          titleInp.addEventListener('blur', commitValue);
+
+          titleInp.addEventListener('keydown', async (ev) => {
+            ev.stopPropagation();
+            if (ev.key === 'Enter') {
+              ev.preventDefault();
+              await commitValue();
+              tasks.push({ done: false, title: '' });
+              this._focusTaskIdx = tasks.length - 1;
+              await this._commitTasks(file, tasks, flashSaved, false, rawKey);
+            } else if (ev.key === 'Escape') {
+              titleInp.blur();
+            }
+          });
+
+          row.addEventListener('click', (ev) => {
+            if (ev.target === row) {
+              titleInp.focus();
+            }
           });
 
           /* Bell — set or edit a reminder linked to this task. */
-          const linked = findProjectTaskReminder(this.plugin, file.path, t.title || '');
+          const cleanText = cleanTaskDisplayTitle(t.title || '');
+          const linked = findProjectTaskReminder(this.plugin, file.path, cleanText || t.title || '');
+          const hasSchedule = linked && linked.when;
           const bell = row.createEl('button', {
-            cls: 'cad-btn cad-btn-sm cad-pd-task-bell' + (linked ? ' linked' : ''),
-            text: linked ? '🔔' : '🔕',
+            cls: 'cad-btn cad-btn-sm cad-pd-task-bell' + (hasSchedule ? ' linked' : ''),
+            text: hasSchedule ? '🔔' : '🔕',
           });
-          bell.title = linked
-            ? `Edit reminder${linked.when ? ' · ' + reminderTimeStr(linked.when) : ''}`
-            : 'Set a reminder for this task';
+          bell.title = hasSchedule
+            ? `Scheduled: ${reminderTimeStr(linked.when)}`
+            : 'Set date & reminder for this task';
           bell.addEventListener('click', async () => {
-            items[idx].title = titleInp.value;
-            await this._commitTasks(file, items, flashSaved, true, rawKey);
+            await commitValue();
 
-            const taskText = titleInp.value.trim();
+            const taskText = cleanTaskDisplayTitle(titleInp.value);
             if (!taskText) {
               new obsidian.Notice('Add a task title first.');
               titleInp.focus();
@@ -5280,9 +5795,23 @@ class CadenceAppView extends obsidian.ItemView {
 
         if (this.plugin.settings.taskManagementSystem !== 'tasknotes') {
           const del = row.createEl('button', { cls: 'cad-btn cad-btn-sm cad-btn-danger', text: '×' });
+          del.title = 'Delete task';
           del.addEventListener('click', async () => {
+            const oldItem = Object.assign({}, items[idx]);
             items.splice(idx, 1);
             await this._commitTasks(file, items, flashSaved, false, rawKey);
+            if (oldItem && oldItem.title) {
+              const cleanT = cleanTaskDisplayTitle(oldItem.title);
+              const linked = findProjectTaskReminder(this.plugin, file.path, cleanT);
+              if (linked) {
+                await this.plugin.deleteReminder(linked.id);
+              } else {
+                const oldDate = parseTaskDate(oldItem.title);
+                if (oldDate && cleanT) {
+                  await removeTaskFromDailyNote(this.app, this.plugin.settings, oldDate, cleanT, file.basename);
+                }
+              }
+            }
           });
         }
       });
@@ -5331,6 +5860,7 @@ priority: normal
         return;
       }
       tasks.push({ done: false, title: '' });
+      this._focusTaskIdx = tasks.length - 1;
       await this._commitTasks(file, tasks, flashSaved, false, rawKey);
     });
   }
@@ -5338,10 +5868,14 @@ priority: normal
   async _commitTasks(file, items, flashSaved, skipRender = false, rawKey = 'Tasks') {
     const body = stringifyTasks(items);
     const content = await this.app.vault.read(file);
-    const next = replaceSection(content, `## ${rawKey}`, body || '');
+    let next = replaceSection(content, `## ${rawKey}`, body || '');
+    const syncRes = syncMilestonesWithTasks(next, items);
+    if (syncRes.changed) {
+      next = syncRes.content;
+    }
     await this.app.vault.modify(file, next);
     if (typeof flashSaved === 'function') flashSaved();
-    if (!skipRender) this.render();
+    if (!skipRender || syncRes.changed) this.render();
   }
 
   _renderMarkdownTextCard(parent, file, sectionKey, label, initialValue, placeholder, flashSaved) {
@@ -5664,16 +6198,26 @@ priority: normal
     }
   }
 
-  _renderDynamicH2Section(parent, file, sections, rawKey, flashSaved) {
+  _renderDynamicH2Section(parent, file, sections, rawKey, flashSaved, projectMilestones = null) {
     const { cleanLabel, tag } = parseHeaderKey(rawKey);
     const cleanLower = cleanLabel.toLowerCase();
 
     if (tag === '#tasks' || cleanLower === 'tasks') {
       const taskList = parseTasksList(sections[rawKey] || '');
-      this._renderTaskSection(parent, file, taskList, flashSaved, rawKey);
+      let milestones = projectMilestones;
+      if (!milestones) {
+        for (const [k, v] of Object.entries(sections || {})) {
+          const pk = parseHeaderKey(k);
+          if (pk.tag === '#milestones' || pk.cleanLabel.toLowerCase() === 'milestones') {
+            milestones = parseMilestones(v);
+            break;
+          }
+        }
+      }
+      this._renderTaskSection(parent, file, taskList, flashSaved, rawKey, milestones);
     } else if (tag === '#milestones' || cleanLower === 'milestones') {
       const milestoneList = parseMilestones(sections[rawKey] || '');
-      this._renderMilestoneSection(parent, file, milestoneList, flashSaved, rawKey);
+      this._renderMilestoneSection(parent, file, milestoneList, flashSaved, rawKey, sections);
     } else if (tag.startsWith('#cross-')) {
       const crossParts = tag.slice('#cross-'.length).split('-');
       if (crossParts.length === 3) {
@@ -6463,7 +7007,7 @@ priority: normal
           this.app.workspace.openLinkText(taskObj.file.path, '', false);
         });
       } else {
-        row.createSpan({ cls: 'cad-task-text', text });
+        row.createSpan({ cls: 'cad-task-text', text: stripProjectLinks(text) });
       }
 
       /* Project link button + chip */
@@ -9628,8 +10172,17 @@ priority: normal
     if (!t) return;
     source = source || {};
 
+    const cleanT = cleanTaskDisplayTitle(t);
+    if (!cleanT) return;
+    const taskDate = parseTaskDate(t);
+    const inlineProjLinks = extractProjectLinks(t);
+
     const reminders = (this.plugin.settings.reminders || []).slice();
-    const matches = reminders.filter((r) => r.text && r.text.trim() === t);
+    const matches = reminders.filter((r) => {
+      if (!r.text) return false;
+      const rClean = cleanTaskDisplayTitle(r.text);
+      return rClean.toLowerCase() === cleanT.toLowerCase() || r.text.trim() === t;
+    });
 
     /* 1. Sync matching reminders (skip the source reminder) */
     for (const r of matches) {
@@ -9638,20 +10191,54 @@ priority: normal
       await this.plugin.updateReminder(r.id, { done: !!done });
     }
 
-    /* 2. For any matching reminder linked to a project, tick that project's task line */
+    /* 2. For any matching reminder linked to a project, or projects identified from source or text, tick project task */
     const projectsTouched = new Set();
-    for (const r of matches) {
-      if (!r.project) continue;
-      if (source.kind === 'project' && source.file && source.file.path === r.project) continue;
-      if (projectsTouched.has(r.project)) continue;
-      projectsTouched.add(r.project);
-      const file = this.app.vault.getAbstractFileByPath(r.project);
-      if (!file || !(file instanceof obsidian.TFile)) continue;
-      await this._tickProjectTaskByText(file, t, !!done);
+    if (source.kind === 'project' && source.file) {
+      projectsTouched.add(source.file.path);
     }
 
-    /* 3. Tick matching task line in relevant daily notes (today + each match's date note + source date) */
+    // Projects from inline links [[Project Name]]
+    for (const pName of inlineProjLinks) {
+      let pFile = null;
+      if (this.app.metadataCache && typeof this.app.metadataCache.getFirstLinkpathDest === 'function') {
+        pFile = this.app.metadataCache.getFirstLinkpathDest(pName, '');
+      }
+      if (!pFile) {
+        pFile = listEntityFiles(this.app, 'project').find((f) => f.basename.toLowerCase() === pName.toLowerCase());
+      }
+      if (!pFile && typeof this.app.vault.getMarkdownFiles === 'function') {
+        pFile = this.app.vault.getMarkdownFiles().find((f) => f.basename.toLowerCase() === pName.toLowerCase());
+      }
+      if (pFile && !projectsTouched.has(pFile.path)) {
+        projectsTouched.add(pFile.path);
+        await this._tickProjectTaskByText(pFile, cleanT, !!done);
+      }
+    }
+
+    // Projects from reminders
+    for (const r of matches) {
+      if (!r.project || projectsTouched.has(r.project)) continue;
+      projectsTouched.add(r.project);
+      const file = this.app.vault.getAbstractFileByPath(r.project);
+      if (file && file instanceof obsidian.TFile) {
+        await this._tickProjectTaskByText(file, cleanT, !!done);
+      }
+    }
+
+    // If source was daily and still no project identified, search all projects for a matching task
+    if (source.kind === 'daily' && projectsTouched.size === 0) {
+      const allProjects = listEntityFiles(this.app, 'project');
+      const projFiles = allProjects.length > 0
+        ? allProjects
+        : (typeof this.app.vault.getMarkdownFiles === 'function' ? this.app.vault.getMarkdownFiles() : []);
+      for (const pFile of projFiles) {
+        await this._tickProjectTaskByText(pFile, cleanT, !!done);
+      }
+    }
+
+    /* 3. Tick matching task line in relevant daily notes (today + each match's date note + task date) */
     const datesToCheck = new Set([ymd(new Date())]);
+    if (taskDate) datesToCheck.add(taskDate);
     matches.forEach((r) => {
       if (r.when) {
         const d = new Date(r.when);
@@ -9665,13 +10252,11 @@ priority: normal
     if (source.kind === 'daily' && source.date) datesToCheck.add(ymd(source.date));
     const settings = this.plugin.settings;
     for (const dateStr of datesToCheck) {
-      const path = settings.dailyNoteFolder
-        ? `${settings.dailyNoteFolder.replace(/\/$/, '')}/${dateStr}.md`
-        : `${dateStr}.md`;
+      const path = dailyNotePath(settings, new Date(dateStr + 'T12:00:00'));
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!file || !(file instanceof obsidian.TFile)) continue;
       if (source.kind === 'daily' && source.file && source.file.path === file.path) continue;
-      await this._tickDailyNoteTaskByText(file, t, !!done);
+      await this._tickDailyNoteTaskByText(file, cleanT, !!done);
     }
   }
 
@@ -9679,10 +10264,20 @@ priority: normal
     let content;
     try { content = await this.app.vault.read(file); } catch (_) { return; }
     const sections = parseH2Sections(content);
-    const tasks = parseTasksList(sections['Tasks'] || '');
+    let tasksKey = 'Tasks';
+    for (const k of Object.keys(sections)) {
+      const { cleanLabel, tag } = parseHeaderKey(k);
+      if (tag === '#tasks' || cleanLabel.toLowerCase() === 'tasks') {
+        tasksKey = k;
+        break;
+      }
+    }
+    const tasks = parseTasksList(sections[tasksKey] || '');
     let changed = false;
+    const cleanTarget = cleanTaskDisplayTitle(text).toLowerCase();
     const updated = tasks.map((tk) => {
-      if (tk.title.trim() === text && !!tk.done !== !!done) {
+      const cleanTk = cleanTaskDisplayTitle(tk.title).toLowerCase();
+      if ((cleanTk === cleanTarget || tk.title.trim() === text) && !!tk.done !== !!done) {
         changed = true;
         return Object.assign({}, tk, { done: !!done });
       }
@@ -9690,7 +10285,11 @@ priority: normal
     });
     if (!changed) return;
     const newSection = stringifyTasks(updated);
-    const next = replaceSection(content, '## Tasks', newSection);
+    let next = replaceSection(content, `## ${tasksKey}`, newSection);
+    const syncRes = syncMilestonesWithTasks(next, updated);
+    if (syncRes.changed) {
+      next = syncRes.content;
+    }
     await this.app.vault.modify(file, next);
   }
 
@@ -9699,9 +10298,11 @@ priority: normal
     try { content = await this.app.vault.read(file); } catch (_) { return; }
     const parsed = parseSections(content, this.plugin.settings);
     let changed = false;
+    const cleanTarget = cleanTaskDisplayTitle(text).toLowerCase();
     const updatedTasks = parsed.tasks.map((line) => {
       const lineText = line.replace(/^\s*-\s\[(x|X| )\]\s/, '').trim();
-      if (lineText !== text) return line;
+      const cleanLineText = cleanTaskDisplayTitle(lineText).toLowerCase();
+      if (cleanLineText !== cleanTarget && lineText !== text) return line;
       const isDone = / \[(x|X)\] /.test(line);
       if (isDone === !!done) return line;
       changed = true;
@@ -9711,7 +10312,7 @@ priority: normal
     });
     if (!changed) return;
     const newSection = updatedTasks.join('\n');
-    const next = replaceSection(content, this.plugin.settings.tasksHeading, newSection);
+    const next = replaceSection(content, this.plugin.settings.tasksHeading || '## Today', newSection);
     await this.app.vault.modify(file, next);
   }
 
@@ -9859,7 +10460,7 @@ priority: normal
             this.app.workspace.openLinkText(taskObj.file.path, '', false);
           });
         } else {
-          row.createSpan({ cls: 'cad-task-text', text });
+          row.createSpan({ cls: 'cad-task-text', text: stripProjectLinks(text) });
         }
 
         /* Project link — chip if linked, then a button */
@@ -10005,6 +10606,18 @@ priority: normal
       const newTasks = [...parsed.tasks, `- [ ] ${text}`];
       const newContent = replaceSection(content, this.plugin.settings.tasksHeading, newTasks.join('\n'));
       await this.app.vault.modify(this.todayFile, newContent);
+
+      const projLinks = extractProjectLinks(text);
+      if (projLinks.length > 0) {
+        const todayStr = ymd(new Date());
+        const projectFiles = listEntityFiles(this.app, 'project');
+        for (const pName of projLinks) {
+          const pFile = projectFiles.find((f) => f.basename.toLowerCase() === pName.toLowerCase());
+          if (pFile) {
+            await syncDailyNoteTaskToProject(this.app, this.plugin.settings, pFile, text, todayStr);
+          }
+        }
+      }
     }
     this.render();
   }
@@ -11420,6 +12033,33 @@ class CadencePlugin extends obsidian.Plugin {
     if (!Array.isArray(this.settings.reminders)) this.settings.reminders = [];
     this.settings.reminders.push(r);
     await this.saveSettings();
+
+    // If reminder has a date, sync to that date's daily note!
+    if (r.when) {
+      const d = new Date(r.when);
+      if (!isNaN(d.getTime())) {
+        const dStr = ymd(d);
+        let projFile = null;
+        if (r.project) {
+          projFile = this.app.vault.getAbstractFileByPath(r.project);
+        }
+        if (!projFile) {
+          const links = extractProjectLinks(r.text);
+          if (links.length > 0) {
+            projFile = listEntityFiles(this.app, 'project').find((f) => f.basename.toLowerCase() === links[0].toLowerCase());
+          }
+        }
+        const cleanTitle = stripTaskDate(stripProjectLinks(r.text)).trim();
+        if (cleanTitle) {
+          const targetProj = projFile || { basename: '' };
+          await syncProjectTaskToDailyNote(this.app, this.settings, targetProj, {
+            title: cleanTitle,
+            done: r.done,
+          }, null, dStr);
+        }
+      }
+    }
+
     this.refreshOpenViews();
     return r;
   }
@@ -11427,13 +12067,60 @@ class CadencePlugin extends obsidian.Plugin {
   async updateReminder(id, patch) {
     const i = (this.settings.reminders || []).findIndex((r) => r.id === id);
     if (i < 0) return null;
+    const oldR = Object.assign({}, this.settings.reminders[i]);
     this.settings.reminders[i] = Object.assign({}, this.settings.reminders[i], patch);
+    const newR = this.settings.reminders[i];
     await this.saveSettings();
+
+    const oldD = oldR.when ? new Date(oldR.when) : null;
+    const newD = newR.when ? new Date(newR.when) : null;
+    const oldDStr = (oldD && !isNaN(oldD.getTime())) ? ymd(oldD) : null;
+    const newDStr = (newD && !isNaN(newD.getTime())) ? ymd(newD) : null;
+    const oldClean = stripTaskDate(stripProjectLinks(oldR.text || '')).trim();
+    const newClean = stripTaskDate(stripProjectLinks(newR.text || '')).trim();
+
+    let projFile = null;
+    const projPath = newR.project || oldR.project;
+    if (projPath) {
+      projFile = this.app.vault.getAbstractFileByPath(projPath);
+    }
+    if (!projFile) {
+      const links = extractProjectLinks(newR.text || oldR.text || '');
+      if (links.length > 0) {
+        projFile = listEntityFiles(this.app, 'project').find((f) => f.basename.toLowerCase() === links[0].toLowerCase());
+      }
+    }
+    const targetProj = projFile || { basename: '' };
+
+    if (oldDStr !== newDStr || oldClean !== newClean || oldR.done !== newR.done) {
+      await syncProjectTaskToDailyNote(this.app, this.settings, targetProj, {
+        title: newClean,
+        done: newR.done,
+      }, {
+        title: oldClean,
+        done: oldR.done,
+      }, newDStr, oldDStr);
+    }
+
     this.refreshOpenViews();
     return this.settings.reminders[i];
   }
 
   async deleteReminder(id) {
+    const r = (this.settings.reminders || []).find((rem) => rem.id === id);
+    if (r && r.when) {
+      const d = new Date(r.when);
+      if (!isNaN(d.getTime())) {
+        const dStr = ymd(d);
+        const cleanTitle = stripTaskDate(stripProjectLinks(r.text || '')).trim();
+        let projectName = '';
+        if (r.project) {
+          const projFile = this.app.vault.getAbstractFileByPath(r.project);
+          if (projFile) projectName = projFile.basename;
+        }
+        await removeTaskFromDailyNote(this.app, this.settings, dStr, cleanTitle, projectName);
+      }
+    }
     this.settings.reminders = (this.settings.reminders || []).filter((r) => r.id !== id);
     await this.saveSettings();
     this.refreshOpenViews();

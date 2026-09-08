@@ -135,6 +135,7 @@
   background: #1e1e1e;
   color: #dcddde;
   border-color: #303030;
+  cursor: text;
 }
 .cadence-app.cad-dark .cad-pd-mile-date:hover,
 .cadence-app.cad-dark .cad-pd-mile-title:hover,
@@ -146,7 +147,33 @@
 .cadence-app.cad-dark .cad-pd-task-title:focus {
   background: #262626;
   border-color: var(--interactive-accent, #5cb85c);
+  box-shadow: 0 0 0 1px var(--interactive-accent, #5cb85c);
   color: #dcddde;
+}
+
+.cadence-app.cad-dark .cad-pd-task-milestone-select {
+  background: #1e1e1e;
+  border-color: #303030;
+  color: #888888;
+}
+.cadence-app.cad-dark .cad-pd-task-milestone-select:hover {
+  background: #262626;
+  border-color: #444444;
+  color: #dcddde;
+}
+.cadence-app.cad-dark .cad-pd-task-milestone-select.active {
+  color: var(--interactive-accent, #5cb85c);
+  border-color: var(--interactive-accent, #5cb85c);
+  background: #1e251e;
+}
+
+.cadence-app.cad-dark .cad-mile-task-badge {
+  background: #2a2a2a;
+  color: #888888;
+}
+.cadence-app.cad-dark .cad-mile-task-badge.all-done {
+  background: rgba(92, 184, 92, 0.2);
+  color: #5cb85c;
 }
 
 /* Buttons (default) */
@@ -804,6 +831,54 @@ body.theme-dark .cadence-app.cad-dark .cad-btn:hover {
 .cad-pd-task-row:hover .cad-pd-task-bell { opacity: 1; }
 .cad-pd-task-bell.linked { opacity: 1; color: var(--interactive-accent); }
 
+/* Milestone selector on project task row */
+.cad-pd-task-milestone-select {
+  appearance: auto;
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 3px 6px;
+  max-width: 140px;
+  cursor: pointer;
+  outline: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: all 120ms ease;
+}
+.cad-pd-task-milestone-select:hover {
+  background: var(--background-primary);
+  color: var(--text-normal);
+  border-color: var(--background-modifier-border-hover, var(--text-muted));
+}
+.cad-pd-task-milestone-select:focus {
+  border-color: var(--interactive-accent);
+}
+.cad-pd-task-milestone-select.active {
+  color: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+  background: var(--background-primary);
+  font-weight: 500;
+}
+
+/* Task progress badge on milestone row */
+.cad-mile-task-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.cad-mile-task-badge.all-done {
+  background: rgba(92, 184, 92, 0.15);
+  color: var(--interactive-accent, #5cb85c);
+}
+
 /* Project tasks section in inbox */
 .cad-pt-wrap {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -1203,9 +1278,12 @@ select.cad-form-input { appearance: auto; padding-right: 28px; }
   font-size: 13px;
   color: var(--text-normal);
   font-family: inherit;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
 }
 .cad-pd-mile-title:hover, .cad-pd-task-title:hover { background: var(--background-primary); border-color: var(--background-modifier-border); }
-.cad-pd-mile-title:focus, .cad-pd-task-title:focus { outline: none; background: var(--background-primary); border-color: var(--interactive-accent); }
+.cad-pd-mile-title:focus, .cad-pd-task-title:focus { outline: none; background: var(--background-primary); border-color: var(--interactive-accent); box-shadow: 0 0 0 1px var(--interactive-accent); }
 
 .cad-pd-mile-row .cad-btn-danger,
 .cad-pd-task-row .cad-btn-danger { opacity: 0; padding: 2px 8px; min-width: 0; }
