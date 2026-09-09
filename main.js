@@ -6810,9 +6810,6 @@ priority: normal
     /* Top of the day — assistant-style briefing */
     await this._renderBriefing(root);
 
-    /* Activity Heatmap & Daily Streak */
-    await this._renderActivityHeatmapCard(root);
-
     /* Two-column grid */
     const cols = root.createDiv({ cls: 'cad-home-cols' });
     const left = cols.createDiv({ cls: 'cad-home-col' });
@@ -8656,6 +8653,9 @@ priority: normal
       const newProj = right.createEl('button', { cls: 'cad-btn primary', text: '+ New Project' });
       newProj.addEventListener('click', () => this._createEntityFromPrompt('project'));
     });
+
+    // ─── Daily Streak & Activity Heatmap ───────────────
+    await this._renderActivityHeatmapCard(root);
 
     // ─── Stats strip ───────────────────────────────────
     const statusField = def.fields.find(f => f.key === 'status') || { options: ['active', 'on_hold', 'backlog', 'done', 'cancelled'] };
