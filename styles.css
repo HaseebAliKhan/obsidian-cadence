@@ -919,6 +919,161 @@ body.theme-dark .cadence-app .cad-heatmap-cell[data-level="4"] {
   }
 }
 
+/* ─────────── Project Task Completion Line Chart ─────────── */
+.cad-linechart-card {
+  margin: 20px 32px 0 32px;
+}
+.cad-linechart-body {
+  padding: 16px 20px 20px 20px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Legend and filter pills */
+.cad-linechart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.cad-linechart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  user-select: none;
+}
+.cad-linechart-legend-item:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--text-muted);
+}
+.cad-linechart-legend-item.dimmed {
+  opacity: 0.35;
+  filter: grayscale(0.6);
+}
+.cad-linechart-legend-item.active {
+  border-color: var(--interactive-accent, #5cb85c);
+}
+.cad-linechart-legend-item.all-pill {
+  font-weight: 600;
+}
+.cad-linechart-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.cad-linechart-legend-name {
+  font-weight: 500;
+  color: var(--text-normal);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cad-linechart-legend-badge {
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--background-primary);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--text-muted);
+  border: 1px solid var(--background-modifier-border);
+}
+
+/* SVG Line Chart */
+.cad-linechart-svg-wrap {
+  width: 100%;
+  overflow: hidden;
+  position: relative;
+}
+.cad-linechart-svg {
+  display: block;
+  overflow: visible;
+}
+.cad-linechart-series {
+  transition: opacity 160ms ease;
+}
+.cad-linechart-path {
+  transition: stroke-width 160ms ease;
+}
+.cad-linechart-dot {
+  cursor: pointer;
+  transition: r 120ms ease, stroke-width 120ms ease, filter 120ms ease;
+}
+.cad-linechart-dot:hover {
+  r: 6.5px;
+  stroke-width: 3px;
+  filter: drop-shadow(0 0 4px rgba(0, 0, 0, 0.4));
+}
+.cad-linechart-axis-label {
+  user-select: none;
+  font-family: inherit;
+}
+
+/* Empty state */
+.cad-linechart-empty {
+  text-align: center;
+  padding: 36px 20px;
+  color: var(--text-muted);
+}
+.cad-linechart-empty-icon {
+  font-size: 32px;
+  margin-bottom: 10px;
+}
+.cad-linechart-empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-normal);
+  margin-bottom: 6px;
+}
+.cad-linechart-empty-sub {
+  font-size: 12px;
+  color: var(--text-faint);
+  max-width: 460px;
+  margin: 0 auto;
+  line-height: 1.4;
+}
+
+/* Dark Mode Overrides */
+.cadence-app.cad-dark .cad-linechart-card,
+body.theme-dark .cadence-app .cad-linechart-card {
+  background: #1E2225;
+  border-color: #303030;
+}
+.cadence-app.cad-dark .cad-linechart-legend-item,
+body.theme-dark .cadence-app .cad-linechart-legend-item {
+  background: #181b1d;
+  border-color: #2a2e32;
+}
+.cadence-app.cad-dark .cad-linechart-legend-item:hover,
+body.theme-dark .cadence-app .cad-linechart-legend-item:hover {
+  background: #25282c;
+  border-color: #444444;
+}
+.cadence-app.cad-dark .cad-linechart-legend-badge,
+body.theme-dark .cadence-app .cad-linechart-legend-badge {
+  background: #121416;
+  border-color: #2a2e32;
+  color: #a0a0a0;
+}
+
+/* Mobile Responsiveness */
+@media (max-width: 900px) {
+  .cad-linechart-card {
+    margin: 14px 16px 0 16px;
+  }
+}
+
 /* ─────────── Home / Command Centre ─────────── */
 .cadence-home .cad-home-cols {
   display: grid; grid-template-columns: 1fr 1fr; gap: 16px;

@@ -614,6 +614,215 @@ function generateHeatmapGrid(anchorDate = new Date(), numWeeks = 26, weekStartsO
   return { startDate, endDate, weeks };
 }
 
+const PROJECT_CHART_COLORS = [
+  '#10b981', // Emerald
+  '#38bdf8', // Sky Blue
+  '#a855f7', // Purple
+  '#f59e0b', // Amber
+  '#ec4899', // Pink
+  '#14b8a6', // Teal
+  '#f97316', // Orange
+  '#6366f1', // Indigo
+  '#84cc16', // Lime
+  '#06b6d4', // Cyan
+  '#e11d48', // Crimson
+  '#8b5cf6', // Violet
+];
+
+async function computeProjectTaskCompletionsByDate(app, settings, numDays = 14, anchorDate = new Date()) {
+  const dateList = [];
+  for (let i = numDays - 1; i >= 0; i--) {
+    dateList.push(ymd(addDays(anchorDate, -i)));
+  }
+  const validDates = new Set(dateList);
+
+  // 1. Discover all projects
+  const projectFiles = (typeof listEntityFiles === 'function' && app)
+    ? listEntityFiles(app, 'project')
+    : [];
+
+  const projMap = {};
+  const projNameMap = new Map();
+  const projPathMap = new Map();
+
+  projectFiles.forEach((f, idx) => {
+    const pName = f.basename;
+    projNameMap.set(pName.toLowerCase(), pName);
+    projPathMap.set(f.path, pName);
+    projPathMap.set(f.path.toLowerCase(), pName);
+
+    let customColor = null;
+    if (app.metadataCache) {
+      const cache = app.metadataCache.getFileCache(f);
+      if (cache && cache.frontmatter) {
+        customColor = cache.frontmatter.color || cache.frontmatter.chartColor || null;
+      }
+    }
+
+    projMap[pName] = {
+      name: pName,
+      color: customColor || PROJECT_CHART_COLORS[idx % PROJECT_CHART_COLORS.length],
+      countsByDate: {},
+      total: 0,
+      file: f,
+    };
+    dateList.forEach((d) => { projMap[pName].countsByDate[d] = 0; });
+  });
+
+  const getCanonicalProject = (raw) => {
+    if (!raw) return null;
+    const clean = String(raw).replace(/^\[\[|\]\]$/g, '').trim();
+    if (projMap[clean]) return clean;
+    const lower = clean.toLowerCase();
+    if (projNameMap.has(lower)) return projNameMap.get(lower);
+    if (projPathMap.has(clean)) return projPathMap.get(clean);
+    if (projPathMap.has(lower)) return projPathMap.get(lower);
+    return null;
+  };
+
+  const seenRecords = new Set();
+  const recordCompletion = (projName, dateStr, taskTitle) => {
+    if (!projName || !dateStr || !validDates.has(dateStr)) return;
+    const canon = getCanonicalProject(projName);
+    if (!canon && !projMap[projName]) {
+      const colorIdx = Object.keys(projMap).length;
+      projMap[projName] = {
+        name: projName,
+        color: PROJECT_CHART_COLORS[colorIdx % PROJECT_CHART_COLORS.length],
+        countsByDate: {},
+        total: 0,
+      };
+      dateList.forEach((d) => { projMap[projName].countsByDate[d] = 0; });
+      projNameMap.set(projName.toLowerCase(), projName);
+    }
+    const finalProj = canon || projName;
+    const cleanT = (typeof cleanTaskDisplayTitle === 'function')
+      ? cleanTaskDisplayTitle(taskTitle)
+      : (taskTitle || '').replace(/\[\[.*?\]\]/g, '').replace(/@\d{4}-\d{2}-\d{2}/g, '').trim();
+
+    const key = `${finalProj.toLowerCase()}::${dateStr}::${cleanT.toLowerCase()}`;
+    if (!seenRecords.has(key)) {
+      seenRecords.add(key);
+      projMap[finalProj].countsByDate[dateStr] = (projMap[finalProj].countsByDate[dateStr] || 0) + 1;
+      projMap[finalProj].total += 1;
+    }
+  };
+
+  // 2. Scan Daily Notes
+  const dailyFolder = (settings && settings.dailyNoteFolder ? settings.dailyNoteFolder : '').replace(/\/+$/, '').toLowerCase();
+  const mdFiles = (app && app.vault && typeof app.vault.getMarkdownFiles === 'function')
+    ? app.vault.getMarkdownFiles()
+    : [];
+
+  for (const file of mdFiles) {
+    const p = file.path.toLowerCase();
+    const isDaily = (dailyFolder && p.startsWith(dailyFolder + '/')) || /^\d{4}-\d{2}-\d{2}$/.test(file.basename);
+    if (isDaily) {
+      const match = file.basename.match(/\d{4}-\d{2}-\d{2}/);
+      if (match && validDates.has(match[0])) {
+        const dateStr = match[0];
+        let content = '';
+        try { content = await app.vault.read(file); } catch (_) { continue; }
+        const lines = content.split('\n');
+        for (const line of lines) {
+          if (/^\s*-\s*\[[xX]\]/.test(line)) {
+            const taskText = line.replace(/^\s*-\s*\[[xX]\]\s*/, '').trim();
+            const inlineProjects = (typeof extractProjectLinks === 'function')
+              ? extractProjectLinks(taskText)
+              : [];
+
+            const dvMatch = taskText.match(/\[project::\s*(?:\[\[)?(.*?)(?:\]\])?\]/i);
+            if (dvMatch && dvMatch[1]) {
+              inlineProjects.push(dvMatch[1].trim());
+            }
+
+            if (settings && settings.taskProjectLinks) {
+              const linkKey = `${file.path}::${taskText}`;
+              const linkedPath = settings.taskProjectLinks[linkKey];
+              if (linkedPath) {
+                const pCanon = getCanonicalProject(linkedPath);
+                if (pCanon) inlineProjects.push(pCanon);
+              }
+            }
+
+            if (inlineProjects.length > 0) {
+              for (const pr of inlineProjects) {
+                recordCompletion(pr, dateStr, taskText);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Scan Project files for completed tasks with inline dates
+  for (const pFile of projectFiles) {
+    const projectName = pFile.basename;
+    let content = '';
+    try { content = await app.vault.read(pFile); } catch (_) { continue; }
+    const sections = (typeof parseH2Sections === 'function') ? parseH2Sections(content) : {};
+    const taskSection = sections['Tasks'] || '';
+    const taskList = (typeof parseTasksList === 'function') ? parseTasksList(taskSection) : [];
+
+    for (const t of taskList) {
+      if (t.done) {
+        const taskDate = (typeof parseTaskDate === 'function') ? parseTaskDate(t.title) : null;
+        if (taskDate && validDates.has(taskDate)) {
+          recordCompletion(projectName, taskDate, t.title);
+        } else {
+          const compMatch = t.title.match(/(?:\[completion::\s*|✅\s*)(\d{4}-\d{2}-\d{2})/i);
+          if (compMatch && validDates.has(compMatch[1])) {
+            recordCompletion(projectName, compMatch[1], t.title);
+          }
+        }
+      }
+    }
+  }
+
+  // 4. Scan Reminders
+  const reminders = (settings && Array.isArray(settings.reminders)) ? settings.reminders : [];
+  reminders.forEach((r) => {
+    if (r && r.done) {
+      const targetDate = r.completedAt || r.when || (r.createdAt ? ymd(new Date(r.createdAt)) : null);
+      if (targetDate) {
+        const dStr = typeof targetDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(targetDate)
+          ? targetDate
+          : ymd(new Date(targetDate));
+        if (validDates.has(dStr)) {
+          let proj = r.project ? getCanonicalProject(r.project) : null;
+          if (!proj && r.text) {
+            const links = (typeof extractProjectLinks === 'function') ? extractProjectLinks(r.text) : [];
+            if (links.length > 0) proj = getCanonicalProject(links[0]);
+          }
+          if (proj) {
+            recordCompletion(proj, dStr, r.text);
+          }
+        }
+      }
+    }
+  });
+
+  const projectList = Object.values(projMap)
+    .sort((a, b) => b.total - a.total);
+
+  let maxCount = 0;
+  let totalTasksCompleted = 0;
+  projectList.forEach((p) => {
+    totalTasksCompleted += p.total;
+    dateList.forEach((d) => {
+      const c = p.countsByDate[d] || 0;
+      if (c > maxCount) maxCount = c;
+    });
+  });
+
+  return {
+    dates: dateList,
+    projects: projectList,
+    maxCount,
+    totalTasksCompleted,
+  };
+}
 
 /* ─────────── TaskNotes Integration Helpers ─────────── */
 function listTaskNotesTasks(app) {
@@ -7032,6 +7241,281 @@ priority: normal
     legend.createSpan({ cls: 'cad-heatmap-legend-label', text: 'More' });
   }
 
+  /* ── Project Task Completion Line Chart ── */
+  async _renderProjectTaskLineChartCard(parent) {
+    const settings = this.plugin.settings;
+    const currentRange = settings.projectLineChartRange || '14d';
+    const rangeConfig = { '7d': 7, '14d': 14, '30d': 30, '90d': 90 };
+    const numDays = rangeConfig[currentRange] || 14;
+
+    const card = parent.createDiv({ cls: 'cad-home-card cad-heatmap-card cad-linechart-card' });
+    card.dataset.tone = 'sky';
+
+    const head = card.createDiv({ cls: 'cad-home-card-head' });
+    head.createDiv({ cls: 'cad-home-card-title', text: '📈 TASKS COMPLETED BY PROJECT' });
+
+    const headActions = head.createDiv({ cls: 'cad-heatmap-head-actions' });
+    const rangeGroup = headActions.createDiv({ cls: 'cad-btn-group cad-heatmap-range-group' });
+
+    const ranges = [
+      { id: '7d', label: '7 Days' },
+      { id: '14d', label: '14 Days' },
+      { id: '30d', label: '30 Days' },
+      { id: '90d', label: '90 Days' },
+    ];
+
+    ranges.forEach((r) => {
+      const btn = rangeGroup.createEl('button', {
+        cls: 'cad-heatmap-range-btn' + (currentRange === r.id ? ' active' : ''),
+        text: r.label,
+      });
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        this.plugin.settings.projectLineChartRange = r.id;
+        await this.plugin.saveSettings();
+        this.render();
+      });
+    });
+
+    const body = card.createDiv({ cls: 'cad-home-card-body cad-linechart-body' });
+
+    // Compute data
+    const chartData = await computeProjectTaskCompletionsByDate(this.app, settings, numDays);
+    const { dates, projects, maxCount, totalTasksCompleted } = chartData;
+    const activeProjects = projects.filter((p) => p.total > 0);
+
+    // Empty state if no tasks done
+    if (totalTasksCompleted === 0 || activeProjects.length === 0) {
+      const emptyWrap = body.createDiv({ cls: 'cad-linechart-empty' });
+      emptyWrap.createDiv({ cls: 'cad-linechart-empty-icon', text: '📊' });
+      emptyWrap.createDiv({
+        cls: 'cad-linechart-empty-title',
+        text: `No completed project tasks in the last ${numDays} days`
+      });
+      emptyWrap.createDiv({
+        cls: 'cad-linechart-empty-sub',
+        text: 'Check off tasks linked to projects in your daily notes or project checklists to see your completion trend over time.'
+      });
+      return;
+    }
+
+    // Top Summary & Legend Bar
+    const legendWrap = body.createDiv({ cls: 'cad-linechart-legend' });
+
+    // "All" pill
+    const allPill = legendWrap.createDiv({ cls: 'cad-linechart-legend-item active all-pill' });
+    allPill.createSpan({ cls: 'cad-linechart-legend-dot', attr: { style: 'background: var(--text-normal);' } });
+    allPill.createSpan({ cls: 'cad-linechart-legend-name', text: 'All Projects' });
+    allPill.createSpan({ cls: 'cad-linechart-legend-badge', text: `${totalTasksCompleted} done` });
+
+    let activeFilterProject = null;
+
+    const projectPills = [];
+    activeProjects.forEach((proj) => {
+      const item = legendWrap.createDiv({ cls: 'cad-linechart-legend-item active' });
+      item.createSpan({ cls: 'cad-linechart-legend-dot', attr: { style: `background: ${proj.color}; box-shadow: 0 0 6px ${proj.color}80;` } });
+      item.createSpan({ cls: 'cad-linechart-legend-name', text: proj.name });
+      item.createSpan({ cls: 'cad-linechart-legend-badge', text: `${proj.total}` });
+      projectPills.push({ proj, el: item });
+
+      item.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (activeFilterProject === proj.name) {
+          activeFilterProject = null;
+        } else {
+          activeFilterProject = proj.name;
+        }
+        updateHighlight();
+      });
+    });
+
+    allPill.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      activeFilterProject = null;
+      updateHighlight();
+    });
+
+    // SVG Line Chart
+    const svgWrap = body.createDiv({ cls: 'cad-linechart-svg-wrap' });
+    const vbWidth = 840;
+    const vbHeight = 220;
+    const paddingLeft = 46;
+    const paddingRight = 24;
+    const paddingTop = 20;
+    const paddingBottom = 34;
+
+    const plotWidth = vbWidth - paddingLeft - paddingRight;
+    const plotHeight = vbHeight - paddingTop - paddingBottom;
+
+    // Y Axis scaling
+    const yMax = Math.max(3, Math.ceil(maxCount * 1.15));
+    const ySteps = yMax <= 4 ? yMax : (yMax <= 8 ? 4 : 5);
+
+    const svg = svgWrap.createSvg('svg', {
+      attr: {
+        viewBox: `0 0 ${vbWidth} ${vbHeight}`,
+        width: '100%',
+        height: '220',
+        class: 'cad-linechart-svg',
+      }
+    });
+
+    // Draw horizontal grid lines & Y labels
+    for (let s = 0; s <= ySteps; s++) {
+      const val = Math.round((s / ySteps) * yMax);
+      const y = paddingTop + plotHeight - (val / yMax) * plotHeight;
+
+      svg.createSvg('line', {
+        attr: {
+          x1: String(paddingLeft),
+          y1: String(y),
+          x2: String(vbWidth - paddingRight),
+          y2: String(y),
+          stroke: 'var(--background-modifier-border)',
+          'stroke-dasharray': s === 0 ? 'none' : '3 3',
+          'stroke-width': '1',
+          opacity: s === 0 ? '0.8' : '0.45',
+        }
+      });
+
+      const yTxt = svg.createSvg('text', {
+        attr: {
+          x: String(paddingLeft - 8),
+          y: String(y + 3.5),
+          'text-anchor': 'end',
+          'font-size': '10',
+          'font-weight': '600',
+          fill: 'var(--text-faint)',
+          class: 'cad-linechart-axis-label',
+        }
+      });
+      yTxt.setText(String(val));
+    }
+
+    // Determine X date label step
+    const xStep = numDays <= 7 ? 1 : (numDays <= 14 ? 2 : (numDays <= 30 ? 5 : 15));
+
+    dates.forEach((dStr, idx) => {
+      const x = paddingLeft + (idx / (dates.length - 1)) * plotWidth;
+      const isLast = idx === dates.length - 1;
+      const isFirst = idx === 0;
+      const isStep = (idx % xStep === 0) || isLast;
+
+      if (isStep) {
+        const dObj = new Date(dStr + 'T12:00:00');
+        const labelStr = isLast ? 'Today' : dObj.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+        const xTxt = svg.createSvg('text', {
+          attr: {
+            x: String(x),
+            y: String(vbHeight - 12),
+            'text-anchor': isFirst ? 'start' : (isLast ? 'end' : 'middle'),
+            'font-size': '10',
+            'font-weight': isLast ? '700' : '500',
+            fill: isLast ? 'var(--text-normal)' : 'var(--text-faint)',
+            class: 'cad-linechart-axis-label',
+          }
+        });
+        xTxt.setText(labelStr);
+      }
+    });
+
+    // Draw lines and dots per project
+    const seriesElements = [];
+
+    activeProjects.forEach((proj) => {
+      const g = svg.createSvg('g', {
+        attr: {
+          class: 'cad-linechart-series',
+          'data-project': proj.name,
+        }
+      });
+
+      const points = dates.map((dStr, idx) => {
+        const x = paddingLeft + (idx / (dates.length - 1)) * plotWidth;
+        const count = proj.countsByDate[dStr] || 0;
+        const y = paddingTop + plotHeight - (count / yMax) * plotHeight;
+        return { x, y, count, date: dStr };
+      });
+
+      const pathD = points.reduce((acc, pt, i) => {
+        return i === 0 ? `M ${pt.x} ${pt.y}` : `${acc} L ${pt.x} ${pt.y}`;
+      }, '');
+
+      const pathEl = g.createSvg('path', {
+        attr: {
+          d: pathD,
+          fill: 'none',
+          stroke: proj.color,
+          'stroke-width': '2.5',
+          'stroke-linecap': 'round',
+          'stroke-linejoin': 'round',
+          class: 'cad-linechart-path',
+        }
+      });
+
+      const dots = [];
+      points.forEach((pt) => {
+        if (pt.count > 0) {
+          const circle = g.createSvg('circle', {
+            attr: {
+              cx: String(pt.x),
+              cy: String(pt.y),
+              r: '4.5',
+              fill: proj.color,
+              stroke: 'var(--background-primary)',
+              'stroke-width': '2',
+              class: 'cad-linechart-dot',
+            }
+          });
+
+          const dObj = new Date(pt.date + 'T12:00:00');
+          const dateFmt = dObj.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+          const tip = `${proj.name}\n${dateFmt}: ${pt.count} ${pt.count === 1 ? 'task' : 'tasks'} done`;
+
+          try {
+            obsidian.setTooltip(circle, tip);
+          } catch (_) {
+            circle.title = tip;
+          }
+
+          dots.push(circle);
+        }
+      });
+
+      seriesElements.push({ proj, g, pathEl, dots });
+    });
+
+    const updateHighlight = () => {
+      if (!activeFilterProject) {
+        allPill.addClass('active');
+        projectPills.forEach(({ el }) => el.addClass('active').removeClass('dimmed'));
+        seriesElements.forEach(({ g, pathEl }) => {
+          g.style.opacity = '1';
+          pathEl.setAttribute('stroke-width', '2.5');
+        });
+      } else {
+        allPill.removeClass('active');
+        projectPills.forEach(({ proj, el }) => {
+          if (proj.name === activeFilterProject) {
+            el.addClass('active').removeClass('dimmed');
+          } else {
+            el.removeClass('active').addClass('dimmed');
+          }
+        });
+        seriesElements.forEach(({ proj, g, pathEl }) => {
+          if (proj.name === activeFilterProject) {
+            g.style.opacity = '1';
+            pathEl.setAttribute('stroke-width', '3.5');
+          } else {
+            g.style.opacity = '0.15';
+            pathEl.setAttribute('stroke-width', '1.5');
+          }
+        });
+      }
+    };
+  }
+
   async _computeBriefing() {
     const items = [];
     const settings = this.plugin.settings;
@@ -8656,6 +9140,9 @@ priority: normal
 
     // ─── Daily Streak & Activity Heatmap ───────────────
     await this._renderActivityHeatmapCard(root);
+
+    // ─── Project Tasks Completion Line Chart ───────────
+    await this._renderProjectTaskLineChartCard(root);
 
     // ─── Stats strip ───────────────────────────────────
     const statusField = def.fields.find(f => f.key === 'status') || { options: ['active', 'on_hold', 'backlog', 'done', 'cancelled'] };
