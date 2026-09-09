@@ -598,6 +598,327 @@ body.theme-dark .cadence-app.cad-dark .cad-btn:hover {
 .cadence-app.cad-dark .cad-briefing-row { color: #D8D5CB; }
 .cadence-app.cad-dark .cad-briefing-row.clickable:hover { background: #262626; }
 
+/* ─────────── Activity Heatmap & Streak System ─────────── */
+.cad-heatmap-card {
+  margin: 20px 32px 0 32px;
+}
+.cad-heatmap-head-actions {
+  margin-left: auto;
+}
+.cad-heatmap-body {
+  padding: 18px 20px;
+}
+
+/* Stats Row */
+.cad-streak-stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.cad-streak-stat-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+.cad-streak-stat-item:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.05);
+}
+.cad-streak-stat-icon {
+  font-size: 22px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.cad-streak-stat-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.cad-streak-stat-val {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-normal);
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+.cad-streak-stat-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+.cad-streak-stat-sub {
+  font-size: 10px;
+  color: var(--text-faint);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Heatmap Header Segmented Controls */
+.cad-heatmap-range-group {
+  display: inline-flex;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+.cad-heatmap-range-btn {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 120ms ease;
+  line-height: 1.4;
+}
+.cad-heatmap-range-btn:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.cad-heatmap-range-btn.active {
+  background: var(--interactive-accent, #5cb85c);
+  color: var(--text-on-accent, #ffffff);
+  font-weight: 600;
+}
+.cadence-app.cad-dark .cad-heatmap-range-group,
+body.theme-dark .cadence-app .cad-heatmap-range-group {
+  background: #181b1d;
+  border-color: #303030;
+}
+.cadence-app.cad-dark .cad-heatmap-range-btn,
+body.theme-dark .cadence-app .cad-heatmap-range-btn {
+  color: #888888;
+}
+.cadence-app.cad-dark .cad-heatmap-range-btn:hover,
+body.theme-dark .cadence-app .cad-heatmap-range-btn:hover {
+  background: #25282c;
+  color: #dcddde;
+}
+.cadence-app.cad-dark .cad-heatmap-range-btn.active,
+body.theme-dark .cadence-app .cad-heatmap-range-btn.active {
+  background: var(--interactive-accent, #5cb85c);
+  color: #ffffff;
+}
+
+/* Heatmap Grid Layout - Full Width Responsive */
+.cad-heatmap-scroll {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 0 10px 0;
+}
+.cad-heatmap-container {
+  display: flex;
+  width: 100%;
+  min-width: 100%;
+  gap: 10px;
+  user-select: none;
+  align-items: stretch;
+}
+.cad-heatmap-day-labels {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(2px, 0.35vw, 4px);
+  margin-top: 22px; /* Aligns with grid below months row (18px + 4px) */
+  height: 126px;
+  flex-shrink: 0;
+  width: 26px;
+  box-sizing: border-box;
+}
+.cad-heatmap-day-label {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-faint);
+  padding-right: 4px;
+}
+.cad-heatmap-day-label.spacer {
+  visibility: hidden;
+}
+.cad-heatmap-grid-area {
+  flex: 1 1 0;
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cad-heatmap-months-row {
+  display: flex;
+  width: 100%;
+  gap: clamp(2px, 0.35vw, 4px);
+  height: 18px;
+}
+.cad-heatmap-month-cell {
+  flex: 1 1 0;
+  min-width: 0;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: visible;
+  line-height: 18px;
+}
+.cad-heatmap-days-grid {
+  display: flex;
+  width: 100%;
+  gap: clamp(2px, 0.35vw, 4px);
+  height: 126px;
+}
+.cad-heatmap-week-col {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(2px, 0.35vw, 4px);
+  height: 100%;
+}
+
+/* Heatmap Cells - Fixed Section Height & Adaptive Box Dimensions */
+.cad-heatmap-cell {
+  flex: 1 1 0;
+  width: 100%;
+  min-height: 0;
+  border-radius: clamp(2px, 0.3vw, 4px);
+  cursor: pointer;
+  box-sizing: border-box;
+  transition: transform 90ms ease, box-shadow 90ms ease;
+}
+.cad-heatmap-cell:hover {
+  transform: scale(1.15);
+  z-index: 10;
+  box-shadow: 0 0 8px rgba(0, 0, 0, 0.3);
+}
+.cad-heatmap-cell.is-today {
+  outline: 2px solid var(--interactive-accent, #5cb85c);
+  outline-offset: 1px;
+}
+
+@media (max-width: 650px) {
+  .cad-heatmap-container {
+    min-width: 540px;
+  }
+}
+
+/* Color Levels - Light Theme */
+.cad-heatmap-cell[data-level="0"] {
+  background: rgba(0, 0, 0, 0.05);
+  border: 1px solid rgba(0, 0, 0, 0.04);
+}
+.cad-heatmap-cell[data-level="1"] {
+  background: #9be9a8;
+}
+.cad-heatmap-cell[data-level="2"] {
+  background: #40c463;
+}
+.cad-heatmap-cell[data-level="3"] {
+  background: #30a14e;
+}
+.cad-heatmap-cell[data-level="4"] {
+  background: #216e39;
+  box-shadow: 0 0 4px rgba(33, 110, 57, 0.4);
+}
+
+/* Color Levels - Dark Theme */
+.cadence-app.cad-dark .cad-heatmap-card,
+body.theme-dark .cadence-app .cad-heatmap-card {
+  background: #1E2225;
+  border-color: #303030;
+}
+.cadence-app.cad-dark .cad-streak-stat-item,
+body.theme-dark .cadence-app .cad-streak-stat-item {
+  background: #181b1d;
+  border-color: #2a2e32;
+}
+.cadence-app.cad-dark .cad-streak-stats-row,
+body.theme-dark .cadence-app .cad-streak-stats-row {
+  border-color: #2a2e32;
+}
+.cadence-app.cad-dark .cad-heatmap-cell[data-level="0"],
+body.theme-dark .cadence-app .cad-heatmap-cell[data-level="0"] {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.03);
+}
+.cadence-app.cad-dark .cad-heatmap-cell[data-level="1"],
+body.theme-dark .cadence-app .cad-heatmap-cell[data-level="1"] {
+  background: #0e4429;
+}
+.cadence-app.cad-dark .cad-heatmap-cell[data-level="2"],
+body.theme-dark .cadence-app .cad-heatmap-cell[data-level="2"] {
+  background: #006d32;
+}
+.cadence-app.cad-dark .cad-heatmap-cell[data-level="3"],
+body.theme-dark .cadence-app .cad-heatmap-cell[data-level="3"] {
+  background: #26a641;
+}
+.cadence-app.cad-dark .cad-heatmap-cell[data-level="4"],
+body.theme-dark .cadence-app .cad-heatmap-cell[data-level="4"] {
+  background: #39d353;
+  box-shadow: 0 0 6px rgba(57, 211, 83, 0.35);
+}
+
+/* Footer & Legend */
+.cad-heatmap-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.cad-heatmap-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-style: italic;
+}
+.cad-heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.cad-heatmap-legend-label {
+  font-size: 10px;
+  color: var(--text-faint);
+  padding: 0 2px;
+}
+.cad-heatmap-legend .cad-heatmap-cell {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 11px;
+  border-radius: 2px;
+  cursor: default;
+}
+.cad-heatmap-legend .cad-heatmap-cell:hover {
+  transform: none;
+}
+
+/* Mobile Responsiveness */
+@media (max-width: 900px) {
+  .cad-heatmap-card {
+    margin: 14px 16px 0 16px;
+  }
+}
+
 /* ─────────── Home / Command Centre ─────────── */
 .cadence-home .cad-home-cols {
   display: grid; grid-template-columns: 1fr 1fr; gap: 16px;

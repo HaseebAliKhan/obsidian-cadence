@@ -279,6 +279,7 @@ const DEFAULT_SETTINGS = {
   collapsedGroups: {},
   currency: 'USD',
   cadenceAppDark: false,
+  heatmapRange: '1y',
   taskProjectLinks: {},
   modules: {
     crm: true,
@@ -455,6 +456,162 @@ function pctBand(pct) {
   if (pct < 50) return 'warn';
   if (pct < 75) return 'mint';
   return 'emerald';
+}
+
+/* ─────────── Activity & Streak System Helpers ─────────── */
+
+async function computeDailyActivityMap(app, settings) {
+  const activityMap = {};
+  const ensureEntry = (dateStr) => {
+    if (!activityMap[dateStr]) {
+      activityMap[dateStr] = { tasks: 0, notes: 0, total: 0 };
+    }
+    return activityMap[dateStr];
+  };
+
+  const mdFiles = (app && app.vault && typeof app.vault.getMarkdownFiles === 'function')
+    ? app.vault.getMarkdownFiles()
+    : [];
+
+  const dailyFolder = (settings && settings.dailyNoteFolder ? settings.dailyNoteFolder : '').replace(/\/+$/, '').toLowerCase();
+
+  for (const file of mdFiles) {
+    const p = file.path.toLowerCase();
+    const isDaily = (dailyFolder && p.startsWith(dailyFolder + '/')) || /^\d{4}-\d{2}-\d{2}$/.test(file.basename);
+
+    if (isDaily) {
+      const match = file.basename.match(/\d{4}-\d{2}-\d{2}/);
+      if (match) {
+        const dateKey = match[0];
+        const entry = ensureEntry(dateKey);
+        entry.notes += 1;
+        entry.total += 1;
+
+        const cache = (app.metadataCache && typeof app.metadataCache.getFileCache === 'function')
+          ? app.metadataCache.getFileCache(file)
+          : null;
+        let tasksDone = 0;
+        if (cache && Array.isArray(cache.listItems)) {
+          cache.listItems.forEach((li) => {
+            if (li.task === 'x' || li.task === 'X') {
+              tasksDone++;
+            }
+          });
+        }
+        if (tasksDone > 0) {
+          entry.tasks += tasksDone;
+          entry.total += tasksDone;
+        }
+      }
+    } else {
+      if (file.stat && file.stat.mtime) {
+        const mDate = ymd(new Date(file.stat.mtime));
+        const entry = ensureEntry(mDate);
+        entry.notes += 1;
+        entry.total += 1;
+      }
+    }
+  }
+
+  // Reminders completed
+  const reminders = (settings && Array.isArray(settings.reminders)) ? settings.reminders : [];
+  reminders.forEach((r) => {
+    if (r && r.done) {
+      const targetDate = r.completedAt || r.when || r.createdAt;
+      if (targetDate) {
+        const d = new Date(targetDate);
+        if (!isNaN(d.getTime())) {
+          const dStr = ymd(d);
+          const entry = ensureEntry(dStr);
+          entry.tasks += 1;
+          entry.total += 1;
+        }
+      }
+    }
+  });
+
+  return activityMap;
+}
+
+function computeStreakStats(activityMap, anchorDate = new Date()) {
+  const todayStr = ymd(anchorDate);
+  const yesterdayStr = ymd(addDays(anchorDate, -1));
+
+  let currentStreak = 0;
+  let checkDate = null;
+
+  if ((activityMap[todayStr]?.total || 0) > 0) {
+    checkDate = anchorDate;
+  } else if ((activityMap[yesterdayStr]?.total || 0) > 0) {
+    checkDate = addDays(anchorDate, -1);
+  }
+
+  if (checkDate) {
+    let d = new Date(checkDate);
+    while (true) {
+      const dStr = ymd(d);
+      if ((activityMap[dStr]?.total || 0) > 0) {
+        currentStreak++;
+        d = addDays(d, -1);
+      } else {
+        break;
+      }
+    }
+  }
+
+  const activeDates = Object.keys(activityMap)
+    .filter((k) => (activityMap[k]?.total || 0) > 0)
+    .sort();
+
+  let longestStreak = 0;
+  let tempStreak = 0;
+  let prevDate = null;
+  let totalTasks = 0;
+
+  for (const dateStr of activeDates) {
+    totalTasks += (activityMap[dateStr]?.tasks || 0);
+    const curr = new Date(dateStr + 'T12:00:00');
+    if (prevDate) {
+      const diffDays = Math.round((curr.getTime() - prevDate.getTime()) / (1000 * 60 * 60 * 24));
+      if (diffDays === 1) {
+        tempStreak++;
+      } else {
+        tempStreak = 1;
+      }
+    } else {
+      tempStreak = 1;
+    }
+    if (tempStreak > longestStreak) longestStreak = tempStreak;
+    prevDate = curr;
+  }
+
+  return {
+    currentStreak,
+    longestStreak,
+    totalActiveDays: activeDates.length,
+    totalTasks,
+  };
+}
+
+function generateHeatmapGrid(anchorDate = new Date(), numWeeks = 26, weekStartsOn = 1) {
+  const currentDay = anchorDate.getDay();
+  const endDate = addDays(anchorDate, (weekStartsOn === 1 ? (7 - (currentDay || 7)) : (6 - currentDay)));
+  const totalDays = numWeeks * 7;
+  const startDate = addDays(endDate, -totalDays + 1);
+
+  const days = [];
+  let d = new Date(startDate);
+  for (let i = 0; i < totalDays; i++) {
+    days.push(new Date(d));
+    d = addDays(d, 1);
+  }
+
+  const weeks = [];
+  for (let w = 0; w < numWeeks; w++) {
+    weeks.push(days.slice(w * 7, (w + 1) * 7));
+  }
+
+  return { startDate, endDate, weeks };
 }
 
 
@@ -6653,6 +6810,9 @@ priority: normal
     /* Top of the day — assistant-style briefing */
     await this._renderBriefing(root);
 
+    /* Activity Heatmap & Daily Streak */
+    await this._renderActivityHeatmapCard(root);
+
     /* Two-column grid */
     const cols = root.createDiv({ cls: 'cad-home-cols' });
     const left = cols.createDiv({ cls: 'cad-home-col' });
@@ -6725,6 +6885,154 @@ priority: normal
     if (items.length >= 4) return "Here's what's worth your attention today.";
     if (items.length === 0) return 'Inbox zero. Clear runway.';
     return "Here's what's on your radar.";
+  }
+
+  /* ── Activity Heatmap & Daily Streak ── */
+  async _renderActivityHeatmapCard(parent) {
+    const settings = this.plugin.settings;
+    const currentRange = settings.heatmapRange || '1y';
+    const rangeConfig = { '3m': 13, '6m': 26, '1y': 52 };
+    const numWeeks = rangeConfig[currentRange] || 52;
+
+    const card = parent.createDiv({ cls: 'cad-home-card cad-heatmap-card' });
+    card.dataset.tone = 'emerald';
+
+    const head = card.createDiv({ cls: 'cad-home-card-head' });
+    head.createDiv({ cls: 'cad-home-card-title', text: '🔥 DAILY STREAK & ACTIVITY' });
+
+    const headActions = head.createDiv({ cls: 'cad-heatmap-head-actions' });
+    const rangeGroup = headActions.createDiv({ cls: 'cad-btn-group cad-heatmap-range-group' });
+
+    const ranges = [
+      { id: '3m', label: '3 Months' },
+      { id: '6m', label: '6 Months' },
+      { id: '1y', label: '1 Year' },
+    ];
+
+    ranges.forEach((r) => {
+      const btn = rangeGroup.createEl('button', {
+        cls: 'cad-heatmap-range-btn' + (currentRange === r.id ? ' active' : ''),
+        text: r.label,
+      });
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        this.plugin.settings.heatmapRange = r.id;
+        await this.plugin.saveSettings();
+        this.render();
+      });
+    });
+
+    const body = card.createDiv({ cls: 'cad-home-card-body cad-heatmap-body' });
+
+    // 1. Activity map & streak calculations
+    const activityMap = await computeDailyActivityMap(this.app, settings);
+    const today = new Date();
+    const stats = computeStreakStats(activityMap, today);
+
+    // 2. Metrics Bar
+    const statsRow = body.createDiv({ cls: 'cad-streak-stats-row' });
+    const mkStat = (icon, val, label, sub) => {
+      const item = statsRow.createDiv({ cls: 'cad-streak-stat-item' });
+      item.createSpan({ cls: 'cad-streak-stat-icon', text: icon });
+      const info = item.createDiv({ cls: 'cad-streak-stat-info' });
+      info.createDiv({ cls: 'cad-streak-stat-val', text: String(val) });
+      info.createDiv({ cls: 'cad-streak-stat-label', text: label });
+      if (sub) info.createDiv({ cls: 'cad-streak-stat-sub', text: sub });
+    };
+
+    const isTodayActive = (activityMap[ymd(today)]?.total || 0) > 0;
+    mkStat('🔥', `${stats.currentStreak} ${stats.currentStreak === 1 ? 'Day' : 'Days'}`, 'Current Streak', isTodayActive ? 'Active today ✓' : 'Complete work today!');
+    mkStat('⚡', `${stats.longestStreak} ${stats.longestStreak === 1 ? 'Day' : 'Days'}`, 'Longest Streak', 'Personal record');
+    mkStat('📅', `${stats.totalActiveDays} ${stats.totalActiveDays === 1 ? 'Day' : 'Days'}`, 'Active Days', 'Total days logged');
+    mkStat('✅', `${stats.totalTasks} ${stats.totalTasks === 1 ? 'Task' : 'Tasks'}`, 'Tasks Done', 'Completed across notes');
+
+    // 3. Heatmap Scrollable Wrapper
+    const heatScroll = body.createDiv({ cls: 'cad-heatmap-scroll' });
+    const heatWrap = heatScroll.createDiv({ cls: 'cad-heatmap-container' });
+
+    // Day labels (Mon, Wed, Fri) on the left
+    const dayLabelsCol = heatWrap.createDiv({ cls: 'cad-heatmap-day-labels' });
+    dayLabelsCol.createDiv({ cls: 'cad-heatmap-day-label', text: 'Mon' });
+    dayLabelsCol.createDiv({ cls: 'cad-heatmap-day-label spacer' });
+    dayLabelsCol.createDiv({ cls: 'cad-heatmap-day-label', text: 'Wed' });
+    dayLabelsCol.createDiv({ cls: 'cad-heatmap-day-label spacer' });
+    dayLabelsCol.createDiv({ cls: 'cad-heatmap-day-label', text: 'Fri' });
+    dayLabelsCol.createDiv({ cls: 'cad-heatmap-day-label spacer' });
+    dayLabelsCol.createDiv({ cls: 'cad-heatmap-day-label spacer' });
+
+    // Grid Area: months row on top + days grid
+    const gridArea = heatWrap.createDiv({ cls: 'cad-heatmap-grid-area' });
+    const monthsRow = gridArea.createDiv({ cls: 'cad-heatmap-months-row' });
+    const daysGrid = gridArea.createDiv({ cls: 'cad-heatmap-days-grid' });
+
+    const { weeks } = generateHeatmapGrid(today, numWeeks, 1);
+
+    let lastMonth = -1;
+    weeks.forEach((week, wIdx) => {
+      const firstDay = week[0];
+      const m = firstDay.getMonth();
+      const monthCell = monthsRow.createDiv({ cls: 'cad-heatmap-month-cell' });
+      if (m !== lastMonth && (wIdx === 0 || firstDay.getDate() <= 7)) {
+        monthCell.setText(firstDay.toLocaleDateString(undefined, { month: 'short' }));
+        lastMonth = m;
+      }
+
+      const col = daysGrid.createDiv({ cls: 'cad-heatmap-week-col' });
+      week.forEach((dayDate) => {
+        const dStr = ymd(dayDate);
+        const data = activityMap[dStr] || { tasks: 0, notes: 0, total: 0 };
+        const total = data.total;
+
+        let level = 0;
+        if (total >= 9) level = 4;
+        else if (total >= 6) level = 3;
+        else if (total >= 3) level = 2;
+        else if (total >= 1) level = 1;
+
+        const cell = col.createDiv({ cls: 'cad-heatmap-cell' });
+        cell.dataset.level = String(level);
+        cell.dataset.date = dStr;
+
+        if (sameDay(dayDate, today)) {
+          cell.addClass('is-today');
+        }
+
+        const formattedDate = dayDate.toLocaleDateString(undefined, {
+          weekday: 'short',
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric',
+        });
+        const tooltipText = `${formattedDate}\n${total} ${total === 1 ? 'activity' : 'activities'} (${data.tasks} tasks, ${data.notes} notes)`;
+
+        try {
+          obsidian.setTooltip(cell, tooltipText);
+        } catch (_) {
+          cell.title = tooltipText;
+        }
+
+        cell.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          const targetObj = new Date(dStr + 'T12:00:00');
+          const dFile = await ensureDailyNote(this.app, this.plugin.settings, targetObj);
+          if (dFile) {
+            this.app.workspace.openLinkText(dFile.path, '', false);
+          }
+        });
+      });
+    });
+
+    // 4. Footer with Hint and Legend
+    const foot = body.createDiv({ cls: 'cad-heatmap-footer' });
+    foot.createDiv({ cls: 'cad-heatmap-hint', text: '💡 Click any square to open or create that day’s daily note' });
+
+    const legend = foot.createDiv({ cls: 'cad-heatmap-legend' });
+    legend.createSpan({ cls: 'cad-heatmap-legend-label', text: 'Less' });
+    for (let l = 0; l <= 4; l++) {
+      const swatch = legend.createDiv({ cls: 'cad-heatmap-cell' });
+      swatch.dataset.level = String(l);
+    }
+    legend.createSpan({ cls: 'cad-heatmap-legend-label', text: 'More' });
   }
 
   async _computeBriefing() {
@@ -12068,6 +12376,11 @@ class CadencePlugin extends obsidian.Plugin {
     const i = (this.settings.reminders || []).findIndex((r) => r.id === id);
     if (i < 0) return null;
     const oldR = Object.assign({}, this.settings.reminders[i]);
+    if (patch.done === true && !patch.completedAt && !this.settings.reminders[i].completedAt) {
+      patch.completedAt = new Date().toISOString();
+    } else if (patch.done === false) {
+      patch.completedAt = null;
+    }
     this.settings.reminders[i] = Object.assign({}, this.settings.reminders[i], patch);
     const newR = this.settings.reminders[i];
     await this.saveSettings();
