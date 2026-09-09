@@ -516,16 +516,13 @@ async function computeDailyActivityMap(app, settings) {
   // Reminders completed
   const reminders = (settings && Array.isArray(settings.reminders)) ? settings.reminders : [];
   reminders.forEach((r) => {
-    if (r && r.done) {
-      const targetDate = r.completedAt || r.when || r.createdAt;
-      if (targetDate) {
-        const d = new Date(targetDate);
-        if (!isNaN(d.getTime())) {
-          const dStr = ymd(d);
-          const entry = ensureEntry(dStr);
-          entry.tasks += 1;
-          entry.total += 1;
-        }
+    if (r && r.done && r.completedAt) {
+      const d = new Date(r.completedAt);
+      if (!isNaN(d.getTime())) {
+        const dStr = ymd(d);
+        const entry = ensureEntry(dStr);
+        entry.tasks += 1;
+        entry.total += 1;
       }
     }
   });
@@ -756,52 +753,48 @@ async function computeProjectTaskCompletionsByDate(app, settings, numDays = 14, 
     }
   }
 
-  // 3. Scan Project files for completed tasks with inline dates
+  // 3. Scan Project files for completed tasks
   for (const pFile of projectFiles) {
     const projectName = pFile.basename;
     let content = '';
     try { content = await app.vault.read(pFile); } catch (_) { continue; }
     const sections = (typeof parseH2Sections === 'function') ? parseH2Sections(content) : {};
-    const taskSection = sections['Tasks'] || '';
-    const taskList = (typeof parseTasksList === 'function') ? parseTasksList(taskSection) : [];
 
-    for (const t of taskList) {
-      if (t.done) {
-        const taskDate = (typeof parseTaskDate === 'function') ? parseTaskDate(t.title) : null;
-        if (taskDate && validDates.has(taskDate)) {
-          recordCompletion(projectName, taskDate, t.title);
-        } else {
-          const compMatch = t.title.match(/(?:\[completion::\s*|✅\s*)(\d{4}-\d{2}-\d{2})/i);
-          if (compMatch && validDates.has(compMatch[1])) {
-            recordCompletion(projectName, compMatch[1], t.title);
+    let taskList = [];
+    for (const [k, v] of Object.entries(sections)) {
+      const { cleanLabel, tag } = parseHeaderKey(k);
+      if (tag === '#tasks' || cleanLabel.toLowerCase() === 'tasks') {
+        taskList = taskList.concat(typeof parseTasksList === 'function' ? parseTasksList(v) : []);
+      }
+    }
+
+    // Support TaskNotes if enabled
+    if (settings && settings.taskManagementSystem === 'tasknotes' && typeof listTaskNotesTasksForFile === 'function') {
+      const tnTasks = listTaskNotesTasksForFile(app, pFile);
+      for (const tn of tnTasks) {
+        if (tn.done) {
+          const tDate = tn.completed || tn.scheduled || tn.due;
+          if (tDate && validDates.has(tDate)) {
+            recordCompletion(projectName, tDate, tn.title);
           }
         }
+      }
+    }
+
+    for (const t of taskList) {
+      // STRICT: Must be completed (- [x] / - [X]). Never count incomplete (- [ ]) tasks!
+      if (!t.done) continue;
+
+      const compMatch = t.title.match(/(?:\[completion::\s*|✅\s*)(\d{4}-\d{2}-\d{2})/i);
+      const taskDate = compMatch
+        ? compMatch[1]
+        : ((typeof parseTaskDate === 'function') ? parseTaskDate(t.title) : null);
+
+      if (taskDate && validDates.has(taskDate)) {
+        recordCompletion(projectName, taskDate, t.title);
       }
     }
   }
-
-  // 4. Scan Reminders
-  const reminders = (settings && Array.isArray(settings.reminders)) ? settings.reminders : [];
-  reminders.forEach((r) => {
-    if (r && r.done) {
-      const targetDate = r.completedAt || r.when || (r.createdAt ? ymd(new Date(r.createdAt)) : null);
-      if (targetDate) {
-        const dStr = typeof targetDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(targetDate)
-          ? targetDate
-          : ymd(new Date(targetDate));
-        if (validDates.has(dStr)) {
-          let proj = r.project ? getCanonicalProject(r.project) : null;
-          if (!proj && r.text) {
-            const links = (typeof extractProjectLinks === 'function') ? extractProjectLinks(r.text) : [];
-            if (links.length > 0) proj = getCanonicalProject(links[0]);
-          }
-          if (proj) {
-            recordCompletion(proj, dStr, r.text);
-          }
-        }
-      }
-    }
-  });
 
   const projectList = Object.values(projMap)
     .sort((a, b) => b.total - a.total);
@@ -1358,6 +1351,7 @@ function parseTaskDate(title) {
 function stripTaskDate(title) {
   if (!title) return '';
   let str = String(title);
+  str = str.replace(/(?:\[completion::\s*|✅\s*)\d{4}-\d{2}-\d{2}\]?/gi, '');
   str = str.replace(/📅\s*\d{4}-\d{2}-\d{2}/g, '');
   str = str.replace(/@\d{4}-\d{2}-\d{2}/g, '');
   str = str.replace(/\[?(?:due|scheduled|by|on)::?\s*\d{4}-\d{2}-\d{2}\]?/gi, '');
@@ -5997,6 +5991,16 @@ class CadenceAppView extends obsidian.ItemView {
           } else {
             const oldItem = Object.assign({}, items[idx]);
             items[idx].done = cb.checked;
+            if (cb.checked) {
+              const todayStr = ymd(new Date());
+              if (!items[idx].title.match(/(?:\[completion::\s*|✅\s*)(\d{4}-\d{2}-\d{2})/i)) {
+                items[idx].title = `${items[idx].title.trim()} ✅ ${todayStr}`;
+              }
+            } else {
+              items[idx].title = items[idx].title
+                .replace(/(?:\[completion::\s*|✅\s*)\d{4}-\d{2}-\d{2}\]?/gi, '')
+                .trim();
+            }
             await this._commitTasks(file, items, flashSaved, false, rawKey);
             await syncProjectTaskToDailyNote(this.app, this.plugin.settings, file, items[idx], oldItem);
             const txt = (items[idx].title || '').trim();
@@ -11074,7 +11078,15 @@ priority: normal
       const cleanTk = cleanTaskDisplayTitle(tk.title).toLowerCase();
       if ((cleanTk === cleanTarget || tk.title.trim() === text) && !!tk.done !== !!done) {
         changed = true;
-        return Object.assign({}, tk, { done: !!done });
+        let newTitle = tk.title;
+        if (done) {
+          if (!newTitle.match(/(?:\[completion::\s*|✅\s*)(\d{4}-\d{2}-\d{2})/i)) {
+            newTitle = `${newTitle.trim()} ✅ ${ymd(new Date())}`;
+          }
+        } else {
+          newTitle = newTitle.replace(/(?:\[completion::\s*|✅\s*)\d{4}-\d{2}-\d{2}\]?/gi, '').trim();
+        }
+        return Object.assign({}, tk, { done: !!done, title: newTitle });
       }
       return tk;
     });
