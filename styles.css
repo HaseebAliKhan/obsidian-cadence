@@ -1773,6 +1773,16 @@ select.cad-form-input { appearance: auto; padding-right: 28px; }
   background: var(--background-primary);
   font-family: inherit; font-size: 13px; line-height: 1.55;
   color: var(--text-normal); resize: vertical;
+  box-sizing: border-box;
+}
+
+.cad-card-preview-wrap {
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.15s ease;
+}
+.cad-card-preview-wrap:hover {
+  background: var(--background-modifier-hover);
 }
 
 /* Milestone notes — fallback */

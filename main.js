@@ -6253,27 +6253,97 @@ priority: normal
     const head = card.createDiv({ cls: 'cad-pd-card-head' });
     head.createDiv({ cls: 'cad-pd-card-title', text: label });
 
-    const openBtn = head.createEl('button', { cls: 'cad-btn cad-btn-sm', attr: { style: 'margin-left: auto; padding: 4px 6px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; border: 1px solid var(--border-color); background: transparent; cursor: pointer;' } });
-    openBtn.title = 'Open this note natively to edit with full Live Preview & Autocomplete';
+    const btnGroup = head.createDiv({ attr: { style: 'margin-left: auto; display: flex; align-items: center; gap: 6px;' } });
+
+    // Mode Toggle Button (Edit / Preview)
+    const toggleBtn = btnGroup.createEl('button', {
+      cls: 'cad-btn cad-btn-sm',
+      attr: { style: 'padding: 4px 8px; display: inline-flex; align-items: center; gap: 4px; border-radius: 4px; border: 1px solid var(--border-color); background: transparent; cursor: pointer; font-size: 11px; color: var(--text-muted);' }
+    });
+
+    const openBtn = btnGroup.createEl('button', {
+      cls: 'cad-btn cad-btn-sm',
+      attr: { style: 'padding: 4px 6px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; border: 1px solid var(--border-color); background: transparent; cursor: pointer;' }
+    });
+    openBtn.title = 'Open this note natively in a split tab';
     try { obsidian.setIcon(openBtn, 'file-text'); } catch (_) { }
     openBtn.addEventListener('click', (ev) => {
       ev.stopPropagation();
       this.app.workspace.openLinkText(file.path, '', 'split');
     });
 
-    const body = card.createDiv({ attr: { style: 'padding: 12px; min-height: 40px; position: relative;' } });
+    const body = card.createDiv({ attr: { style: 'position: relative; min-height: 80px;' } });
 
-    // Preview container
-    const previewDiv = body.createDiv({ cls: 'markdown-preview-view', attr: { style: 'padding: 0; min-height: 30px;' } });
+    // Helper to detect default template placeholder text
+    const isPlaceholderText = (val) => {
+      if (!val) return true;
+      const t = val.trim();
+      return (
+        t === '_Enter your notes here..._' ||
+        t === 'Enter your notes here...' ||
+        t === '_Company description and profile..._' ||
+        t === '_Background, interests, and how we met..._' ||
+        t === '_Context and general notes..._' ||
+        t === '_The outcome we want to achieve..._'
+      );
+    };
 
-    // Render the initial markdown preview
+    let currentValue = isPlaceholderText(initialValue) ? '' : (initialValue || '');
+    let isEditing = !currentValue.trim();
+
+    // 1. Textarea element
+    const ta = body.createEl('textarea', { cls: 'cad-pd-textarea' });
+    ta.placeholder = placeholder || `Enter your ${label.toLowerCase()} here...`;
+    ta.value = currentValue;
+
+    // 2. Preview element
+    const previewWrap = body.createDiv({
+      cls: 'cad-card-preview-wrap',
+      attr: { style: 'padding: 12px 14px; min-height: 60px; cursor: pointer;' }
+    });
+    previewWrap.title = 'Click to edit';
+    const previewDiv = previewWrap.createDiv({ cls: 'markdown-preview-view', attr: { style: 'padding: 0; min-height: 30px;' } });
+
+    let saveTimer = null;
+    const commitValue = async (val) => {
+      currentValue = val;
+      let content = '';
+      try { content = await this.app.vault.read(file); } catch (_) { return; }
+      const nextContent = replaceSection(content, `## ${sectionKey}`, val);
+      await this.app.vault.modify(file, nextContent);
+      if (typeof flashSaved === 'function') flashSaved();
+    };
+
+    const autoResize = () => {
+      ta.style.height = 'auto';
+      ta.style.height = Math.max(80, ta.scrollHeight) + 'px';
+    };
+
+    ta.addEventListener('input', () => {
+      autoResize();
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        commitValue(ta.value);
+      }, 500);
+    });
+
+    ta.addEventListener('blur', () => {
+      if (saveTimer) clearTimeout(saveTimer);
+      commitValue(ta.value);
+    });
+
     const renderPreview = () => {
       previewDiv.empty();
-      const rawText = initialValue || '';
+      const rawText = currentValue || '';
+      if (!rawText.trim()) {
+        previewDiv.createDiv({
+          text: placeholder || `Click to enter ${label.toLowerCase()}...`,
+          attr: { style: 'color: var(--text-faint); font-style: italic; font-size: 0.95em; padding: 4px 0;' }
+        });
+        return;
+      }
       try {
         obsidian.MarkdownRenderer.renderMarkdown(rawText, previewDiv, file.path, this);
-
-        // Find all standard Obsidian [[...]] internal links and bind open handlers!
         previewDiv.querySelectorAll('a.internal-link').forEach(a => {
           const href = a.getAttribute('data-href') || a.getAttribute('href');
           if (href) {
@@ -6287,12 +6357,57 @@ priority: normal
       } catch (e) {
         previewDiv.setText(rawText);
       }
-      // Add subtle placeholder if empty
-      if (!rawText.trim()) {
-        const ph = previewDiv.createDiv({ text: placeholder || 'Empty section.', attr: { style: 'color: var(--text-faint); font-style: italic; font-size: 0.9em; padding: 4px 0;' } });
+    };
+
+    const updateView = () => {
+      if (isEditing) {
+        previewWrap.style.display = 'none';
+        ta.style.display = 'block';
+        toggleBtn.empty();
+        try { obsidian.setIcon(toggleBtn, 'eye'); } catch (_) { }
+        toggleBtn.createSpan({ text: ' Preview', attr: { style: 'margin-left: 2px;' } });
+        toggleBtn.title = 'Preview rendered markdown';
+        autoResize();
+      } else {
+        renderPreview();
+        ta.style.display = 'none';
+        previewWrap.style.display = 'block';
+        toggleBtn.empty();
+        try { obsidian.setIcon(toggleBtn, 'edit-3'); } catch (_) { }
+        toggleBtn.createSpan({ text: ' Edit', attr: { style: 'margin-left: 2px;' } });
+        toggleBtn.title = 'Edit notes';
       }
     };
-    renderPreview();
+
+    toggleBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (isEditing) {
+        commitValue(ta.value);
+        isEditing = false;
+        updateView();
+      } else {
+        isEditing = true;
+        updateView();
+        setTimeout(() => {
+          ta.focus();
+          autoResize();
+        }, 10);
+      }
+    });
+
+    previewWrap.addEventListener('click', (ev) => {
+      if (ev.target && (ev.target.tagName === 'A' || ev.target.closest('a'))) {
+        return;
+      }
+      isEditing = true;
+      updateView();
+      setTimeout(() => {
+        ta.focus();
+        autoResize();
+      }, 10);
+    });
+
+    updateView();
   }
 
   _renderProjectTextSection(parent, file, sections, def, flashSaved) {
